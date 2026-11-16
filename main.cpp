@@ -50,7 +50,7 @@ namespace fs = std::filesystem;
 #define SM_CXPADDEDBORDER 92
 #endif
 using json = nlohmann::json;
-static const char* kVer = "0.0.6";
+static const char* kVer = "0.0.5";
 
 // ====== Настройка: Azure Client ID для входа через Microsoft (см. объяснение в ответе) ======
 static const std::string kMsClientId = ""; // можно оставить пустым: ID вводится в приложении (вкладка «Аккаунт») и сохраняется в config.json
@@ -1012,14 +1012,13 @@ struct Config {
     int lang = 0, color = 1, gpu = 0; // язык (0 ru, 1 en), цвет лаунчера (0..4), видеокарта
     bool light = false, rounded = true, modsOn = true, logsOn = true;
     std::string jvmArgs;
-    bool rustMode = false; std::string rustExe, rustArgs; // режим «Minecraft Rust» (клиент Horizon)
     std::vector<Account> accs;
 };
 static Config cfg;
 static void SaveConfig() {
     json j; j["loader"] = cfg.loader; j["version"] = cfg.version; j["java"] = cfg.javaPath; j["bg"] = cfg.bg; j["shots"] = cfg.shotsDir;
     j["snap"] = cfg.snapshots; j["slide"] = cfg.slideshow; j["ram"] = cfg.ramMB; j["sel"] = cfg.sel; j["msid"] = MsId(); j["gamedir"] = cfg.gameDir; j["beta"] = cfg.showBeta; j["alpha"] = cfg.showAlpha; j["onlaunch"] = cfg.onLaunch;
-    j["lang"] = cfg.lang; j["color"] = cfg.color; j["gpu"] = cfg.gpu; j["light"] = cfg.light; j["round"] = cfg.rounded; j["mods"] = cfg.modsOn; j["logs"] = cfg.logsOn; j["jvm"] = cfg.jvmArgs; j["ofbuild"] = cfg.optiBuild; j["rust"] = cfg.rustMode; j["rustexe"] = cfg.rustExe; j["rustargs"] = cfg.rustArgs;
+    j["lang"] = cfg.lang; j["color"] = cfg.color; j["gpu"] = cfg.gpu; j["light"] = cfg.light; j["round"] = cfg.rounded; j["mods"] = cfg.modsOn; j["logs"] = cfg.logsOn; j["jvm"] = cfg.jvmArgs; j["ofbuild"] = cfg.optiBuild;
     for (auto& a : cfg.accs) j["accs"].push_back({{"type", a.type}, {"name", a.name}, {"uuid", a.uuid}, {"token", a.token}, {"refresh", a.refresh}});
     WriteAll(gCfgDir / "config.json", j.dump(2));
 }
@@ -1031,7 +1030,7 @@ static void LoadConfig() {
         { std::string id = j.value("msid", ""); if (!id.empty()) SetMsId(id); }
         cfg.gameDir = j.value("gamedir", ""); cfg.showBeta = j.value("beta", false); cfg.showAlpha = j.value("alpha", false); cfg.onLaunch = j.value("onlaunch", 0);
         cfg.lang = j.value("lang", 0); cfg.color = j.value("color", 1); cfg.gpu = j.value("gpu", 0); cfg.light = j.value("light", false); cfg.rounded = j.value("round", true);
-        cfg.modsOn = j.value("mods", true); cfg.logsOn = j.value("logs", true); cfg.jvmArgs = j.value("jvm", ""); cfg.optiBuild = j.value("ofbuild", ""); cfg.rustMode = j.value("rust", false); cfg.rustExe = j.value("rustexe", ""); cfg.rustArgs = j.value("rustargs", "");
+        cfg.modsOn = j.value("mods", true); cfg.logsOn = j.value("logs", true); cfg.jvmArgs = j.value("jvm", ""); cfg.optiBuild = j.value("ofbuild", "");
         if (j.contains("accs")) for (auto& a : j["accs"]) cfg.accs.push_back({a.value("type", 0), a.value("name", ""), a.value("uuid", ""), a.value("token", ""), a.value("refresh", "")});
     } catch (...) {}
 }
@@ -1239,106 +1238,6 @@ static void LaunchThread(Config c, Account acc) {
     }
     gGameRunning = false; gCancel = false; gBusy = false;
 }
-
-// ============================ Запуск Minecraft Rust (Horizon) ============================
-// Два режима. 1) Авто (путь не указан): лаунчер сам скачивает лаунчер Horizon (официальный релиз horizon-rust/horizon),
-// через его командную строку ставит игру и запускает её. 2) Ручной: указан horizon.exe — запускаем его напрямую
-// (файлы Java Edition 26.3 докачивает наш лаунчер, папка передаётся через HORIZON_MINECRAFT_DIR).
-static const char* const kRustMc = "26.3";
-static const char* const kHorizonRepo = "horizon-rust/horizon";
-static char bRustExe[520], bRustArgs[256];
-static fs::path FindHorizonLauncher() {
-    std::error_code ec; fs::path dir = gRoot / "horizon-launcher";
-    if (!fs::exists(dir, ec)) return {};
-    for (auto& e : fs::recursive_directory_iterator(dir, ec))
-        if (e.is_regular_file(ec) && e.path().filename() == L"horizon-launcher.exe") return e.path();
-    return {};
-}
-static fs::path EnsureHorizonLauncher() { // скачать и распаковать лаунчер Horizon, если его ещё нет
-    fs::path ex = FindHorizonLauncher(); if (!ex.empty()) return ex;
-    Status("Ищу последний лаунчер Horizon на GitHub..."); gProg = 0.05f;
-    gNetUA = "PoltergeistLauncher"; std::string url, tag;
-    for (int page = 1; page <= 5 && url.empty(); page++) { // релизы лаунчера идут с тегами launcher-v*, среди релизов самой игры
-        Resp r = Http(std::string("https://api.github.com/repos/") + kHorizonRepo + "/releases?per_page=100&page=" + std::to_string(page), "GET", "", "Accept: application/vnd.github+json\r\n");
-        if (r.status == 403 || r.status == 429) throw std::runtime_error("GitHub временно ограничил запросы (лимит). Попробуй позже или укажи horizon.exe вручную.");
-        json j = Parse(r.body); if (r.status != 200 || !j.is_array() || j.empty()) break;
-        for (auto& rel : j) {
-            std::string t = JStr(rel, "tag_name"); if (t.rfind("launcher-v", 0) != 0 || rel.value("draft", false)) continue;
-            if (!rel.contains("assets")) continue;
-            for (auto& as : rel["assets"]) {
-                std::string n = JStr(as, "name"), l = n; for (char& ch : l) ch = (char)tolower((unsigned char)ch);
-                bool zip = l.size() > 4 && l.compare(l.size() - 4, 4, ".zip") == 0;
-                if (zip && l.find("windows") != std::string::npos && l.find("arm") == std::string::npos) { url = JStr(as, "browser_download_url"); tag = t; break; }
-            }
-            if (!url.empty()) break;
-        }
-    }
-    if (url.empty()) throw std::runtime_error("Не нашёл архив лаунчера Horizon для Windows x64 на GitHub. Скачай лаунчер с playhorizon.dev и укажи horizon.exe вручную.");
-    CheckCancel(); Status("Скачиваю лаунчер Horizon (" + tag + ")..."); gProg = 0.1f;
-    fs::path zip = gRoot / "cache" / "horizon-launcher.zip";
-    if (!Download(url, zip, true)) throw std::runtime_error("Не удалось скачать лаунчер Horizon");
-    CheckCancel(); gProg = 0.25f; std::error_code ec; fs::create_directories(gRoot / "horizon-launcher", ec);
-    if (!Unzip(zip, gRoot / "horizon-launcher")) throw std::runtime_error("Не удалось распаковать лаунчер Horizon");
-    fs::remove(zip, ec);
-    ex = FindHorizonLauncher(); if (ex.empty()) throw std::runtime_error("В архиве нет horizon-launcher.exe");
-    return ex;
-}
-static void LaunchRustThread(Config c) {
-    gBusy = true; gProg = 0;
-    try {
-        bool manual = !c.rustExe.empty();
-        if (manual && !fs::exists(P(c.rustExe))) throw std::runtime_error("Файл Horizon не найден: " + c.rustExe);
-        std::string cmd; fs::path cwd; std::string exeForGpu;
-        EnvGuard eg;
-        if (manual) {
-            fs::path gameDir = gRoot / "instances" / P(std::string("rust-") + kRustMc);
-            Status(std::string("Получаю описание версии ") + kRustMc);
-            json v = LoadVersionJson(kRustMc);
-            if (v.is_null()) throw std::runtime_error(std::string("Не удалось получить версию ") + kRustMc + " (нет интернета или версии нет в манифесте Mojang?)");
-            Prep pre; Prepare(v, kRustMc, gameDir, pre); CheckCancel();
-            std::error_code ec; fs::create_directories(gameDir, ec);
-            cmd = Q(c.rustExe); if (!c.rustArgs.empty()) cmd += " " + c.rustArgs;
-            eg.Set("HORIZON_MINECRAFT_DIR", PS(gRoot));
-            cwd = P(c.rustExe).parent_path(); exeForGpu = c.rustExe;
-        } else {
-            fs::path hl = EnsureHorizonLauncher(); CheckCancel();
-            cwd = hl.parent_path(); exeForGpu = PS(hl);
-            std::string cap;
-            Status("Устанавливаю/обновляю Horizon..."); gProg = 0.4f;
-            int ic = RunProcess(Q(PS(hl)) + " install latest", cwd, cap); CheckCancel();
-            if (ic != 0) throw std::runtime_error("Установка Horizon не удалась (код " + std::to_string(ic) + "). Подробности в логе.");
-            std::string acc; gProg = 0.6f; Status("Проверяю вход в аккаунт Horizon...");
-            int ac = RunProcess(Q(PS(hl)) + " account list", cwd, acc); CheckCancel();
-            bool hasAcc = false; for (char ch : acc) if (!isspace((unsigned char)ch)) { hasAcc = true; break; }
-            if (ac != 0 || !hasAcc) { // нужен вход через Microsoft: это делается один раз в окне лаунчера Horizon
-                ShellExecuteW(0, L"open", hl.wstring().c_str(), 0, cwd.wstring().c_str(), SW_SHOWNORMAL);
-                gProg = 0; Status("Войди в Microsoft-аккаунт в открывшемся окне Horizon, потом нажми ИГРАТЬ снова");
-                gGameRunning = false; gCancel = false; gBusy = false; return;
-            }
-            cmd = Q(PS(hl)) + " play"; if (!c.rustArgs.empty()) cmd += " --arg " + Q(c.rustArgs);
-        }
-        ApplyGpuPref(exeForGpu, c.gpu);
-        CheckCancel();
-        gProg = 1.0f; Status(std::string("Horizon запущен (") + kRustMc + ")");
-        gGameRunning = true; int act = c.onLaunch;
-        if (act == 1 || act == 2) std::thread([act] {
-            for (int i = 0; i < (act == 1 ? 8 : 40) && gGameRunning; i++) Sleep(500);
-            if (!gGameRunning) return;
-            if (act == 1) PostMessageW(gHwnd, WM_APP_HIDE, 0, 0); else PostMessageW(gHwnd, WM_CLOSE, 0, 0);
-        }).detach();
-        std::string cap; int code = RunProcess(cmd, cwd, cap);
-        gGameRunning = false;
-        if (act == 1) PostMessageW(gHwnd, WM_APP_SHOW, 0, 0);
-        if (gLogOn) WriteAll(gCfgDir / "latest.log", cap);
-        if (gCancel) Status("Игра закрыта");
-        else if (code != 0) { auto [t, b] = Analyze(code, cap); Status("Horizon завершился с ошибкой: " + t); ShowError(t, b); }
-        else Status("Игра закрыта");
-    } catch (std::exception& e) {
-        if (gCancel) { gProg = 0; Status("Остановлено"); }
-        else { Status(std::string("Ошибка: ") + e.what()); ShowError("Не удалось запустить Horizon", e.what()); }
-    }
-    gGameRunning = false; gCancel = false; gBusy = false;
-}
 // Кнопка «Остановить» (идёт загрузка/установка) и «Закрыть» (игра уже запущена)
 static void StopLaunch() {
     if (!gBusy || gCancel) return;
@@ -1361,7 +1260,6 @@ static bool AddOffline(const std::string& name) {
 }
 static void StartLaunch() {
     if (gBusy || gDelBusy) return;
-    if (cfg.rustMode) { SaveConfig(); gCancel = false; std::thread(LaunchRustThread, cfg).detach(); return; } // Rust: аккаунт не нужен (Horizon пока без входа)
     if (cfg.accs.empty() && !AddOffline(bNick)) return; // нет аккаунтов - играем офлайн с ником из поля ввода
     if (cfg.sel < 0 || cfg.sel >= (int)cfg.accs.size()) cfg.sel = 0;
     SaveConfig();
@@ -1445,19 +1343,12 @@ static std::string PickImage(HWND hw) {
     return GetOpenFileNameW(&o) ? U8(f) : "";
 }
 
-static std::string PickExe(HWND hw) {
-    wchar_t f[MAX_PATH] = {0}; OPENFILENAMEW o{}; o.lStructSize = sizeof(o); o.hwndOwner = hw;
-    o.lpstrFilter = L"Horizon (*.exe)\0*.exe\0Все файлы\0*.*\0"; o.lpstrFile = f; o.nMaxFile = MAX_PATH;
-    o.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
-    return GetOpenFileNameW(&o) ? U8(f) : "";
-}
-
 // ============================ UI ============================
 enum { S_MAIN, S_ACC, S_MODS, S_SET, S_LOG };
 static int gScr = S_MAIN, gSetTab = 0; static float gScrFade = 1;
 static void Go(int s) { if (gScr != s) { gScr = s; gScrFade = 0; if (s == S_ACC) { std::lock_guard<std::mutex> l(gMu); gAuthMsg.clear(); } } }
 static float gS = 1.f; static int gThemeSig = -1;
-static float gCapH = 0.f, gBtnX0 = 1e9f, gMenuX1 = 0.f; // зона перетаскивания окна (свой заголовок) для WM_NCHITTEST
+static float gCapH = 0.f, gBtnX0 = 1e9f; // зона перетаскивания окна (свой заголовок) для WM_NCHITTEST
 static ImFont *gFTitle = nullptr, *gFSub = nullptr; // крупные шрифты: вместо масштабирования, чтобы текст был чётким
 static ImVec4 gAccent(0.33f, 0.78f, 0.40f, 1.f), gSoft(1.f, 1.f, 1.f, 0.12f);
 static const ImVec4 kPalette[5] = {ImVec4(0.26f, 0.52f, 0.96f, 1.f), ImVec4(0.33f, 0.78f, 0.40f, 1.f), ImVec4(0.92f, 0.30f, 0.30f, 1.f),
@@ -1873,7 +1764,7 @@ static void ScrMain() {
 
     // строка статуса + прогресс слева, мелкие кнопки справа
     float full = ImGui::GetContentRegionAvail().x, sbw = em * 5.4f, rowH = em * 2.6f, sp = sty.ItemSpacing.x;
-    int nb = 1 + ((cfg.modsOn && !cfg.rustMode) ? 1 : 0) + (cfg.logsOn ? 1 : 0);
+    int nb = 1 + (cfg.modsOn ? 1 : 0) + (cfg.logsOn ? 1 : 0);
     float leftW = std::max(em * 6.f, full - (nb * sbw + (nb - 1) * sp) - sp * 3); // SameLine(0, sp*2) ниже: запас, чтобы кнопки не вылезали за край
     {
         ImVec2 p = ImGui::GetCursorScreenPos(); float h = em * .3f, pr = AnimK("prog", gProg.load(), 6.f); bool busy = gBusy;
@@ -1902,33 +1793,13 @@ static void ScrMain() {
             ImGui::EndPopup();
         }
     }
-    if (cfg.modsOn && !cfg.rustMode) { ImGui::SameLine(); if (FancyBtn(T("Моды", "Mods"), ImVec2(sbw, em * 1.9f), gSoft)) Go(S_MODS); }
+    if (cfg.modsOn) { ImGui::SameLine(); if (FancyBtn(T("Моды", "Mods"), ImVec2(sbw, em * 1.9f), gSoft)) Go(S_MODS); }
 
     // нижний ряд: версия | ИГРАТЬ | аккаунт
     float avail = ImGui::GetContentRegionAvail().x, bh = em * 2.8f, wl = (avail - 2 * sp) * 0.30f, wc = avail - 2 * sp - 2 * wl; bool busy = gBusy;
     std::string vl = cfg.loader + "  " + (cfg.version.empty() ? std::string(T("загрузка...", "loading...")) : cfg.version);
-    if (cfg.rustMode) vl = std::string("Rust  ") + kRustMc;
-    if (FancyBtn(vl.c_str(), ImVec2(wl, bh), gSoft)) { if (cfg.rustMode) ImGui::OpenPopup("##rustset"); else { RefreshInstNames(true); ImGui::OpenPopup("##vers"); } }
-    if (cfg.rustMode) { // настройки Horizon: путь к horizon.exe и доп. аргументы
-        ImVec2 bmin = ImGui::GetItemRectMin(), bmax = ImGui::GetItemRectMax();
-        ImGui::SetNextWindowPos(ImVec2(bmin.x, bmin.y - 4), 0, ImVec2(0, 1));
-        ImGui::SetNextWindowSize(ImVec2(std::max(bmax.x - bmin.x, em * 26.f), 0));
-        if (ImGui::BeginPopup("##rustset")) {
-            ImGui::TextColored(gAccent, "Minecraft Rust (Horizon %s)", kRustMc);
-            ImGui::Separator();
-            TD(T("Свой horizon.exe (необязательно; пусто = авто-установка)", "Custom horizon.exe (optional; empty = auto-install)"));
-            ImGui::SetNextItemWidth(-1); if (ImGui::InputText("##rexe", bRustExe, sizeof(bRustExe))) cfg.rustExe = bRustExe;
-            if (FancyBtn(T("Выбрать файл...", "Browse..."), ImVec2(em * 11, em * 1.9f), gSoft)) { std::string f = PickExe(gHwnd); if (!f.empty()) { cfg.rustExe = f; snprintf(bRustExe, sizeof(bRustExe), "%s", f.c_str()); SaveConfig(); } }
-            TD(T("Доп. аргументы игры", "Extra game arguments"));
-            ImGui::SetNextItemWidth(-1); if (ImGui::InputText("##rargs", bRustArgs, sizeof(bRustArgs))) cfg.rustArgs = bRustArgs;
-            ImGui::Dummy(ImVec2(0, em * .3f));
-            ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + em * 25.f);
-            TD(T("Пусто: лаунчер сам скачает и обновит Horizon. Нужен Microsoft-аккаунт с купленной Java Edition: войти нужно один раз в окне Horizon.", "Empty: the launcher downloads and updates Horizon itself. Needs a Microsoft account that owns Java Edition: sign in once in the Horizon window."));
-            ImGui::PopTextWrapPos();
-            ImGui::EndPopup();
-        }
-    }
-    if (!cfg.rustMode) {
+    if (FancyBtn(vl.c_str(), ImVec2(wl, bh), gSoft)) { RefreshInstNames(true); ImGui::OpenPopup("##vers"); }
+    {
         ImVec2 bmin = ImGui::GetItemRectMin(), bmax = ImGui::GetItemRectMax();
         ImGui::SetNextWindowPos(ImVec2(bmin.x, bmin.y - 4), 0, ImVec2(0, 1));
         ImGui::SetNextWindowSize(ImVec2(std::max(bmax.x - bmin.x, em * 16.f), std::max(em * 8.f, std::min(em * 19.f, bmin.y - em))));
@@ -2004,10 +1875,10 @@ static void ScrMain() {
         FancyBtn(run ? T("Игра запущена", "Game running") : T("Работаю...", "Working..."), ImVec2(pw, bh), gAccent, false);
         ImGui::SameLine();
         if (FancyBtn(req ? T("Останавливаю...", "Stopping...") : run ? T("Закрыть", "Close") : T("Остановить", "Stop"), ImVec2(sw, bh), ImVec4(0.80f, 0.27f, 0.27f, 1.f), !req)) StopLaunch();
-    } else if (FancyBtn(T("ИГРАТЬ", "PLAY"), ImVec2(wc, bh), gAccent, !gDelBusy && (cfg.rustMode || !cfg.version.empty()))) StartLaunch();
+    } else if (FancyBtn(T("ИГРАТЬ", "PLAY"), ImVec2(wc, bh), gAccent, !gDelBusy && !cfg.version.empty())) StartLaunch();
     ImGui::SameLine();
     std::string al = (cfg.sel >= 0 && cfg.sel < (int)cfg.accs.size()) ? cfg.accs[cfg.sel].name : std::string(T("Добавить аккаунт", "Add account"));
-    if (FancyBtn(al.c_str(), ImVec2(wl, bh), gSoft, !cfg.rustMode)) Go(S_ACC);
+    if (FancyBtn(al.c_str(), ImVec2(wl, bh), gSoft)) Go(S_ACC);
 }
 
 // ---------- Аккаунты ----------
@@ -2563,33 +2434,6 @@ static void DrawUI(float W, float H) {
             if (clk) PostMessageW(gHwnd, close ? WM_CLOSE : WM_SYSCOMMAND, i == 0 ? SC_MINIMIZE : (i == 1 ? (maxed ? SC_RESTORE : SC_MAXIMIZE) : 0), 0); // через очередь, не посреди кадра
         }
     }
-    { // кнопка «три полоски» слева сверху: выбор режима (Minecraft Java / Minecraft Rust)
-        float bw = em * 2.6f, bh = em * 1.7f, x0 = em * 1.2f, y0 = (tbH - bh) / 2 + em * .2f;
-        const char* cur = cfg.rustMode ? "Minecraft Rust" : "Minecraft Java";
-        float lw = ImGui::CalcTextSize(cur).x;
-        gMenuX1 = x0 + bw + em * .8f + lw + em * .5f;
-        ImVec2 a(x0, y0), b(a.x + bw, a.y + bh);
-        ImGui::SetCursorScreenPos(a); ImGui::PushID(300);
-        bool clk = ImGui::InvisibleButton("##hamb", ImVec2(bw, bh));
-        float t = AnimK("h", ImGui::IsItemHovered() ? 1.f : 0.f, 14.f);
-        ImVec4 base = cfg.light ? ImVec4(0, 0, 0, .08f) : ImVec4(1, 1, 1, .10f), hov = cfg.light ? ImVec4(0, 0, 0, .18f) : ImVec4(1, 1, 1, .22f);
-        ImVec4 c(base.x + (hov.x - base.x) * t, base.y + (hov.y - base.y) * t, base.z + (hov.z - base.z) * t, base.w + (hov.w - base.w) * t);
-        dl->AddRectFilled(a, b, ImGui::GetColorU32(c), R(bh * .32f));
-        float mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2, hw = em * .5f, gap = em * .3f, th = std::max(1.5f, 1.8f * gS);
-        for (int k = -1; k <= 1; k++) dl->AddLine(ImVec2(mx - hw, my + k * gap), ImVec2(mx + hw, my + k * gap), TextCol(), th);
-        dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(b.x + em * .8f, (a.y + b.y) / 2 - em * .5f), TextCol(.85f), cur);
-        ImGui::PopID();
-        if (clk) ImGui::OpenPopup("##modemenu");
-        ImGui::SetNextWindowPos(ImVec2(a.x, b.y + 4));
-        ImGui::SetNextWindowSize(ImVec2(em * 14.f, 0));
-        if (ImGui::BeginPopup("##modemenu")) {
-            bool off = gBusy || gGameRunning;
-            if (ImGui::Selectable("Minecraft Java", !cfg.rustMode) && !off && cfg.rustMode) { cfg.rustMode = false; SaveConfig(); ImGui::CloseCurrentPopup(); }
-            if (ImGui::Selectable("Minecraft Rust", cfg.rustMode) && !off && !cfg.rustMode) { cfg.rustMode = true; snprintf(bRustExe, sizeof(bRustExe), "%s", cfg.rustExe.c_str()); snprintf(bRustArgs, sizeof(bRustArgs), "%s", cfg.rustArgs.c_str()); SaveConfig(); ImGui::CloseCurrentPopup(); }
-            if (off) { ImGui::Separator(); TD(T("Сначала закрой игру", "Close the game first")); }
-            ImGui::EndPopup();
-        }
-    }
     float pw = W - em * 2.4f, px = em * 1.2f - (1 - intro) * em * 3, py = tbH, ph = H - tbH - em * 1.2f;
     dl->AddRectFilled(ImVec2(px, py), ImVec2(px + pw, py + ph), cfg.light ? IM_COL32(246, 248, 252, (int)(228 * intro)) : IM_COL32(14, 17, 26, (int)(190 * intro)), R(em * .9f));
     dl->AddRect(ImVec2(px, py), ImVec2(px + pw, py + ph), cfg.light ? IM_COL32(0, 0, 0, (int)(40 * intro)) : IM_COL32(255, 255, 255, (int)(30 * intro)), R(em * .9f));
@@ -2679,7 +2523,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             if (L) return HTLEFT; if (Rt) return HTRIGHT; if (Tp) return HTTOP; if (Bt) return HTBOTTOM;
         }
         ScreenToClient(h, &pt);
-        if (pt.y >= 0 && pt.y < (LONG)gCapH && pt.x >= (LONG)gMenuX1 && pt.x < (LONG)gBtnX0) return HTCAPTION;
+        if (pt.y >= 0 && pt.y < (LONG)gCapH && pt.x < (LONG)gBtnX0) return HTCAPTION;
         return HTCLIENT;
     }
     case WM_SIZE:
@@ -2741,7 +2585,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int) {
     }
     ImGui_ImplWin32_Init(gHwnd); ImGui_ImplDX11_Init(gDev, gCtx);
 
-    LoadConfig(); snprintf(bJava, sizeof(bJava), "%s", cfg.javaPath.c_str()); snprintf(bJvm, sizeof(bJvm), "%s", cfg.jvmArgs.c_str()); gLogOn = cfg.logsOn; snprintf(bRustExe, sizeof(bRustExe), "%s", cfg.rustExe.c_str()); snprintf(bRustArgs, sizeof(bRustArgs), "%s", cfg.rustArgs.c_str());
+    LoadConfig(); snprintf(bJava, sizeof(bJava), "%s", cfg.javaPath.c_str()); snprintf(bJvm, sizeof(bJvm), "%s", cfg.jvmArgs.c_str()); gLogOn = cfg.logsOn;
     if (!cfg.gameDir.empty()) { // своя папка игры из настроек
         std::error_code e2; fs::create_directories(P(cfg.gameDir), e2);
         if (!e2 && fs::is_directory(P(cfg.gameDir), e2)) gRoot = P(cfg.gameDir); else cfg.gameDir.clear();
