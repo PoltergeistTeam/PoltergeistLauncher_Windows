@@ -1,17 +1,19 @@
-// PTLauncher (PTL) — C++17, Linux: GLFW + OpenGL3 + Dear ImGui + libcurl.
+// PTLauncher (PTL) — C++17, Win32 + Direct3D11 + Dear ImGui.
 // Vanilla / Fabric / Forge / NeoForge / Quilt / OptiFine, Java auto-detect+download, offline / Ely.by / Microsoft,
 // custom backgrounds from screenshots, crash explainer.
-#include <unistd.h>
-#include <fcntl.h>
-#include <signal.h>
-#include <sys/stat.h>
-#include <sys/wait.h>
-#include <sys/utsname.h>
-#include <curl/curl.h>
-#include <cstdint>
-#include <cerrno>
-#include <cstdio>
-#include <cstdlib>
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <winhttp.h>
+#include <commdlg.h>
+#include <shellapi.h>
+#include <objbase.h>
+#include <shlobj.h>
+#include <dwmapi.h>
+#include <wincrypt.h>
+#include <d3d11.h>
 #include <atomic>
 #include <thread>
 #include <mutex>
@@ -30,14 +32,12 @@
 #include <chrono>
 #include <tuple>
 #include <regex>
-#include <dlfcn.h>
 #include <cstdio>
 #include <ctime>
 #include <memory>
 #include "imgui.h"
-#include "imgui_impl_glfw.h"
-#include "imgui_impl_opengl3.h"
-#include <GLFW/glfw3.h>
+#include "imgui_impl_win32.h"
+#include "imgui_impl_dx11.h"
 #include <nlohmann/json.hpp>
 #include <miniz.h>
 #define STB_IMAGE_IMPLEMENTATION
@@ -48,11 +48,14 @@
 #include <stb_image.h>
 
 namespace fs = std::filesystem;
+#ifndef SM_CXPADDEDBORDER
+#define SM_CXPADDEDBORDER 92
+#endif
 using json = nlohmann::json;
 static const char* kVer = "0.0.6";
 static const char* kAppName = "PTLauncher";
-static const char* kRepoApi = "https://api.github.com/repos/PoltergeistTeam/PoltergeistLauncher_Linux/releases/latest";
-static const char* kRepoUrl = "https://github.com/PoltergeistTeam/PoltergeistLauncher_Linux/releases/latest";
+static const char* kRepoApi = "https://api.github.com/repos/PoltergeistTeam/PoltergeistLauncher_Windows/releases/latest";
+static const char* kRepoUrl = "https://github.com/PoltergeistTeam/PoltergeistLauncher_Windows/releases/latest";
 
 // ====== Настройка: Azure Client ID для входа через Microsoft (см. объяснение в ответе) ======
 static const std::string kMsClientId = ""; // можно оставить пустым: ID вводится в приложении (вкладка «Аккаунт») и сохраняется в config.json
@@ -62,17 +65,27 @@ static void SetMsId(const std::string& v) { std::lock_guard<std::mutex> l(gIdMu)
 static const std::string kAuthlibUrl = "https://github.com/yushijinhun/authlib-injector/releases/download/v1.2.5/authlib-injector-1.2.5.jar";
 
 // ============================ Утилиты ============================
-// Linux: все пути и строки — UTF-8 (std::string), W()/U8() оставлены как заглушки для совместимости с остальным кодом.
-extern char** environ;
-static void Sleep(unsigned ms) { std::this_thread::sleep_for(std::chrono::milliseconds(ms)); }
-static std::string W(const std::string& s) { return s; }
-static std::string U8(const std::string& s) { return s; }
-static fs::path P(const std::string& s) { return fs::path(s); }
-static std::string PS(const fs::path& p) { return p.string(); }
-static std::string Env(const char* n) { const char* v = getenv(n); return v ? std::string(v) : std::string(); }
-static std::string HomeDir() { std::string h = Env("HOME"); return h.empty() ? std::string("/tmp") : h; }
-static std::string ShQ(const std::string& s) { std::string r = "'"; for (char c : s) { if (c == '\'') r += "'\\''"; else r += c; } return r + "'"; }
-static void OpenExternal(const std::string& what) { std::string cmd = "xdg-open " + ShQ(what) + " >/dev/null 2>&1 &"; if (system(cmd.c_str()) != 0) {} }
+static std::wstring W(const std::string& s) {
+    if (s.empty()) return L"";
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), 0, 0);
+    std::wstring w(n, 0);
+    MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), &w[0], n);
+    return w;
+}
+static std::string U8(const std::wstring& w) {
+    if (w.empty()) return "";
+    int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), 0, 0, 0, 0);
+    std::string s(n, 0);
+    WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), &s[0], n, 0, 0);
+    return s;
+}
+static fs::path P(const std::string& s) { return fs::path(W(s)); }
+static std::string PS(const fs::path& p) { return U8(p.wstring()); }
+static std::wstring Env(const wchar_t* n) {
+    wchar_t b[2048];
+    DWORD l = GetEnvironmentVariableW(n, b, 2048);
+    return (l && l < 2048) ? std::wstring(b, l) : L"";
+}
 static std::string ReadAll(const fs::path& p) {
     std::ifstream f(p, std::ios::binary);
     std::stringstream ss; ss << f.rdbuf();
@@ -81,7 +94,7 @@ static std::string ReadAll(const fs::path& p) {
 static void WriteAll(const fs::path& p, const std::string& d) {
     std::error_code ec;
     fs::create_directories(p.parent_path(), ec);
-    fs::path t = p; t += ".tmp";
+    fs::path t = p; t += L".tmp";
     { std::ofstream f(t, std::ios::binary); f.write(d.data(), (std::streamsize)d.size()); }
     fs::rename(t, p, ec);
 }
@@ -116,17 +129,25 @@ static std::string Sub(std::string s, const std::map<std::string, std::string>& 
 // ============================ Глобальное состояние ============================
 static fs::path gRoot;    // папка игры (версии, библиотеки, Java, instances)
 static fs::path gCfgDir;  // папка настроек лаунчера (config.json) — всегда одна и та же
-static GLFWwindow* gWin = nullptr; static std::atomic<bool> gGameRunning{false};
-static std::atomic<int> gWinCmd{0}; // команды окну из других потоков: 1 свернуть, 2 вернуть, 3 закрыть
+static HWND gHwnd; static std::atomic<bool> gGameRunning{false};
+enum { WM_TRAY = WM_APP + 1, WM_APP_HIDE = WM_APP + 2, WM_APP_SHOW = WM_APP + 3 }; // трей: спрятать лаунчер в фон / показать
 static std::mutex gMu;
 static std::deque<std::string> gLog;
 static std::string gStatus = "Готов к запуску";
 static std::atomic<float> gProg{0};
 static std::atomic<bool> gBusy{false}, gDelBusy{false};
 static std::atomic<bool> gCancel{false};   // пользователь нажал «Остановить» / «Закрыть»
-static std::atomic<pid_t> gChildPid{0};    // процесс, который сейчас выполняет лаунчер (игра, установщик, патчер)
 struct Cancelled : std::runtime_error { Cancelled() : std::runtime_error("Остановлено") {} };
 static void CheckCancel() { if (gCancel) throw Cancelled(); }
+// Процесс, который сейчас выполняет лаунчер (игра, установщик, патчер). Лежит в Job Object, чтобы убивались и дочерние процессы.
+static std::mutex gProcMu; static DWORD gChildPid = 0; static HANDLE gChildProc = nullptr, gChildJob = nullptr;
+static bool ChildIs(DWORD pid) { std::lock_guard<std::mutex> l(gProcMu); return pid && gChildPid == pid; }
+static void ProcHardKill(DWORD pid) { // жёсткое завершение
+    std::lock_guard<std::mutex> l(gProcMu); if (!pid || gChildPid != pid) return;
+    if (gChildJob) TerminateJobObject(gChildJob, 1); else if (gChildProc) TerminateProcess(gChildProc, 1);
+}
+static BOOL CALLBACK EnumCloseWnd(HWND h, LPARAM lp) { DWORD pid = 0; GetWindowThreadProcessId(h, &pid); if (pid == (DWORD)lp && IsWindowVisible(h)) PostMessageW(h, WM_CLOSE, 0, 0); return TRUE; }
+static void ProcSoftClose(DWORD pid) { if (pid) EnumWindows(EnumCloseWnd, (LPARAM)pid); } // как крестик на окне игры: Minecraft успевает сохранить мир
 static bool gShowCrash = false;
 static std::string gCrashTitle, gCrashBody;
 static std::string gMsCode, gMsUri;
@@ -141,57 +162,62 @@ static std::ofstream gLogFile; // полный лог сессии: <папка 
 static void Log(const std::string& s) {
     if (!gLogOn) return;
     std::lock_guard<std::mutex> l(gMu); gLog.push_back(s); if (gLog.size() > 3000) gLog.pop_front();
-    if (gLogFile.is_open()) { time_t tt = time(nullptr); struct tm lt{}; localtime_r(&tt, &lt); char ts[24]; snprintf(ts, sizeof(ts), "[%02d:%02d:%02d] ", lt.tm_hour, lt.tm_min, lt.tm_sec); gLogFile << ts << s << "\n"; gLogFile.flush(); }
+    if (gLogFile.is_open()) { SYSTEMTIME st; GetLocalTime(&st); char ts[24]; snprintf(ts, sizeof(ts), "[%02d:%02d:%02d] ", (int)st.wHour, (int)st.wMinute, (int)st.wSecond); gLogFile << ts << s << "\n"; gLogFile.flush(); }
 }
 static void Status(const std::string& s) { { std::lock_guard<std::mutex> l(gMu); gStatus = s; } Log(s); }
 static void AuthMsg(const std::string& s) { { std::lock_guard<std::mutex> l(gMu); gAuthMsg = s; } Status(s); }
 static void ShowError(const std::string& t, const std::string& b) { std::lock_guard<std::mutex> l(gMu); gShowCrash = true; gCrashTitle = t; gCrashBody = b; }
 
-// ============================ HTTP (libcurl) ============================
+// ============================ HTTP (WinHTTP) ============================
 struct Resp { int status = 0; std::string body; };
-static thread_local std::string gNetUA; // если не пусто — свой User-Agent (для optifine.net нужен «браузерный»)
-static thread_local std::string gNetErr; static thread_local bool gNetSafe = false; static thread_local long gNetTimeout = 0; // причина последней сетевой ошибки; «безопасный» режим (IPv4 + HTTP/1.1); общий таймаут
-static size_t CurlWrite(char* p, size_t s, size_t n, void* u) { static_cast<std::string*>(u)->append(p, s * n); return s * n; }
-static int CurlProg(void*, curl_off_t, curl_off_t, curl_off_t, curl_off_t) { return gCancel ? 1 : 0; } // «Остановить» прерывает любую загрузку
+static thread_local std::string gNetUA;  // свой User-Agent для запроса (для optifine.net нужен «браузерный»)
+static thread_local std::string gNetErr;  // причина последней сетевой ошибки
+static std::mutex gReqMu; static std::set<HINTERNET> gReqs; // активные запросы: «Остановить» закрывает их, чтобы прервать зависшую загрузку
+static void AbortHttp() { std::lock_guard<std::mutex> l(gReqMu); for (HINTERNET h : gReqs) WinHttpCloseHandle(h); gReqs.clear(); }
 static Resp Http(const std::string& url, const std::string& method = "GET", const std::string& body = "", const std::string& hdr = "") {
-    Resp r; gNetErr.clear();
-    CURL* c = curl_easy_init(); if (!c) { gNetErr = "curl_easy_init failed"; return r; }
-    std::string ua = std::string("PTLauncher/") + kVer + " (github.com/PoltergeistTeam/PoltergeistLauncher_Linux)";
-    if (!gNetUA.empty()) ua = gNetUA;
-    curl_easy_setopt(c, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(c, CURLOPT_USERAGENT, ua.c_str());
-    curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(c, CURLOPT_MAXREDIRS, 10L);
-    curl_easy_setopt(c, CURLOPT_ACCEPT_ENCODING, "");
-    curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 20L);
-    curl_easy_setopt(c, CURLOPT_LOW_SPEED_LIMIT, 1L);   // «завис» = ни байта за 60 с
-    curl_easy_setopt(c, CURLOPT_LOW_SPEED_TIME, 60L);
-    curl_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
-    curl_easy_setopt(c, CURLOPT_COOKIEFILE, "");   // включаем cookie-движок (optifine.net выдаёт ссылку и куки вместе)
-    curl_easy_setopt(c, CURLOPT_NOPROGRESS, 0L);
-    curl_easy_setopt(c, CURLOPT_XFERINFOFUNCTION, CurlProg);
-    if (gNetSafe) { curl_easy_setopt(c, CURLOPT_IPRESOLVE, (long)CURL_IPRESOLVE_V4); curl_easy_setopt(c, CURLOPT_HTTP_VERSION, (long)CURL_HTTP_VERSION_1_1); }
-    if (gNetTimeout > 0) curl_easy_setopt(c, CURLOPT_TIMEOUT, gNetTimeout);
-    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, CurlWrite);
-    curl_easy_setopt(c, CURLOPT_WRITEDATA, &r.body);
-    if (method == "POST") {
-        curl_easy_setopt(c, CURLOPT_POST, 1L);
-        curl_easy_setopt(c, CURLOPT_POSTFIELDS, body.data());
-        curl_easy_setopt(c, CURLOPT_POSTFIELDSIZE_LARGE, (curl_off_t)body.size());
-    } else if (method != "GET") {
-        curl_easy_setopt(c, CURLOPT_CUSTOMREQUEST, method.c_str());
-        if (!body.empty()) { curl_easy_setopt(c, CURLOPT_POSTFIELDS, body.data()); curl_easy_setopt(c, CURLOPT_POSTFIELDSIZE_LARGE, (curl_off_t)body.size()); }
+    Resp r; gNetErr.clear(); if (gCancel) return r;
+    std::wstring w = W(url);
+    URL_COMPONENTSW uc{}; uc.dwStructSize = sizeof(uc);
+    uc.dwHostNameLength = uc.dwUrlPathLength = uc.dwExtraInfoLength = (DWORD)-1;
+    if (!WinHttpCrackUrl(w.c_str(), 0, 0, &uc)) { gNetErr = "неверный адрес (" + url + ")"; return r; }
+    std::wstring host(uc.lpszHostName, uc.dwHostNameLength), path(uc.lpszUrlPath, uc.dwUrlPathLength + uc.dwExtraInfoLength);
+    static HINTERNET ses = [] {
+        std::wstring ua = W(std::string("PTLauncher/") + kVer + " (github.com/PoltergeistTeam/PoltergeistLauncher_Windows)");
+        HINTERNET h = WinHttpOpen(ua.c_str(), WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, 0, 0, 0);
+        if (!h) h = WinHttpOpen(ua.c_str(), WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, 0, 0, 0); // старые Windows (до 8.1)
+        return h;
+    }();
+    HINTERNET con = WinHttpConnect(ses, host.c_str(), uc.nPort, 0);
+    if (!con) { gNetErr = "WinHTTP: не удалось подключиться, код " + std::to_string(GetLastError()) + " (" + url + ")"; return r; }
+    HINTERNET req = WinHttpOpenRequest(con, W(method).c_str(), path.c_str(), 0, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                       uc.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0);
+    if (req) {
+        { std::lock_guard<std::mutex> l(gReqMu); gReqs.insert(req); }
+        DWORD pol = WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS; WinHttpSetOption(req, WINHTTP_OPTION_REDIRECT_POLICY, &pol, sizeof(pol)); // переходы http<->https
+        if (!gNetUA.empty()) { std::wstring u = L"User-Agent: " + W(gNetUA); WinHttpAddRequestHeaders(req, u.c_str(), (DWORD)-1, WINHTTP_ADDREQ_FLAG_REPLACE | WINHTTP_ADDREQ_FLAG_ADD); }
+        std::wstring h = W(hdr);
+        BOOL ok = WinHttpSendRequest(req, h.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : h.c_str(), h.empty() ? 0 : (DWORD)-1,
+                                     body.empty() ? WINHTTP_NO_REQUEST_DATA : (LPVOID)body.data(), (DWORD)body.size(), (DWORD)body.size(), 0)
+                  && WinHttpReceiveResponse(req, 0);
+        if (ok) {
+            DWORD sc = 0, sz = sizeof(sc);
+            WinHttpQueryHeaders(req, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &sc, &sz, WINHTTP_NO_HEADER_INDEX);
+            r.status = (int)sc;
+            if (sc != 200) gNetErr = "HTTP " + std::to_string(sc) + " (" + url + ")";
+            for (;;) {
+                if (gCancel) break;
+                DWORD n = 0;
+                if (!WinHttpQueryDataAvailable(req, &n) || !n) break;
+                size_t o = r.body.size(); r.body.resize(o + n);
+                DWORD rd = 0; WinHttpReadData(req, &r.body[o], n, &rd); r.body.resize(o + rd);
+            }
+        } else if (!gCancel) gNetErr = "WinHTTP: ошибка " + std::to_string(GetLastError()) + " (" + url + ")";
+        bool own; { std::lock_guard<std::mutex> l(gReqMu); own = gReqs.erase(req) > 0; } // если «Остановить» уже закрыл запрос — второй раз не закрываем
+        if (own) WinHttpCloseHandle(req);
     }
-    curl_slist* hl = nullptr;
-    { size_t p = 0; while (p < hdr.size()) { size_t e = hdr.find("\r\n", p); if (e == std::string::npos) e = hdr.size(); if (e > p) hl = curl_slist_append(hl, hdr.substr(p, e - p).c_str()); p = e + 2; } }
-    if (hl) curl_easy_setopt(c, CURLOPT_HTTPHEADER, hl);
-    CURLcode rc = curl_easy_perform(c);
-    { char* eu = nullptr; curl_easy_getinfo(c, CURLINFO_EFFECTIVE_URL, &eu); std::string effUrl = eu ? eu : url;
-      if (rc == CURLE_OK) { long sc = 0; curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &sc); r.status = (int)sc; if (sc != 200) gNetErr = "HTTP " + std::to_string(sc) + " (" + effUrl + ")"; }
-      else { r.body.clear(); gNetErr = std::string(curl_easy_strerror(rc)) + " (" + effUrl + ")"; } }
-    if (hl) curl_slist_free_all(hl);
-    curl_easy_cleanup(c);
-    if (!gCancel && r.status != 200 && r.status != 204 && !gNetErr.empty()) Log("[сеть] " + gNetErr); // причина сбоя попадает в лог
+    WinHttpCloseHandle(con);
+    if (gCancel) { r.status = 0; r.body.clear(); }
+    else if (r.status != 200 && r.status != 204 && !gNetErr.empty()) Log("[сеть] " + gNetErr); // причина сбоя попадает в лог
     return r;
 }
 static Resp PostJson(const std::string& url, const json& j) {
@@ -263,48 +289,29 @@ static int JavaMajorFromHome(const fs::path& home) {
     if (a == 1) { auto d = v.find('.'); return d == std::string::npos ? 0 : atoi(v.c_str() + d + 1); }
     return a;
 }
-static int RunProcess(const std::string& cmd, const fs::path& cwd, std::string& captured);
-static std::string HostArch() { struct utsname u; if (uname(&u) == 0) { std::string m = u.machine; if (m == "aarch64" || m == "arm64") return "arm64"; } return "x86_64"; }
-static int MajorFromName(const std::string& n) { // java-17-openjdk-amd64 -> 17, java-1.8.0-openjdk -> 8, jdk-21.0.2 -> 21
-    for (size_t i = 0; i < n.size(); i++) if (isdigit((unsigned char)n[i])) {
-        int a = atoi(n.c_str() + i);
-        if (a == 1 && i + 2 < n.size() && n[i + 1] == '.') return atoi(n.c_str() + i + 2);
-        return a;
-    }
-    return 0;
-}
-static bool HasAwt(const fs::path& h) { // у «headless»-пакетов дистрибутивов нет libawt_xawt.so — Minecraft на них не запустится
-    std::error_code ec;
-    for (const char* r : {"lib/libawt_xawt.so", "lib/amd64/libawt_xawt.so", "lib/aarch64/libawt_xawt.so", "jre/lib/amd64/libawt_xawt.so", "jre/lib/aarch64/libawt_xawt.so"})
-        if (fs::exists(h / r, ec)) return true;
-    return false;
-}
 static std::vector<JavaInfo> FindJavas() {
     std::vector<fs::path> homes; std::error_code ec;
-    auto add = [&](const fs::path& h) { if (fs::exists(h / "bin" / "java", ec)) homes.push_back(h); };
+    auto add = [&](const fs::path& h) { if (fs::exists(h / "bin" / "java.exe", ec)) homes.push_back(h); };
     auto scan = [&](const fs::path& d) { if (!fs::is_directory(d, ec)) return; for (auto& e : fs::directory_iterator(d, ec)) if (e.is_directory(ec)) add(e.path()); };
-    std::string home = HomeDir();
-    for (const char* d : {"/usr/lib/jvm", "/usr/lib64/jvm", "/usr/java", "/usr/lib/java", "/usr/local/java", "/usr/local/lib/jvm", "/opt/java", "/opt/jdk", "/opt/jvm", "/opt"}) scan(d);
-    for (const char* d : {".sdkman/candidates/java", ".jdks", ".asdf/installs/java", ".local/share/mise/installs/java", ".local/share/JetBrains/jdks"}) scan(fs::path(home) / d);
-    std::string jh = Env("JAVA_HOME"); if (!jh.empty()) add(fs::path(jh));
-    for (auto& p : Split(Env("PATH"), ':')) { // java из PATH (через симлинки к реальному JDK)
-        if (p.empty()) continue;
-        fs::path j = fs::path(p) / "java";
-        if (fs::exists(j, ec)) { fs::path rp = fs::canonical(j, ec); if (!ec) add(rp.parent_path().parent_path()); }
+    for (auto v : {L"ProgramFiles", L"ProgramFiles(x86)"}) {
+        std::wstring pfw = Env(v); if (pfw.empty()) continue; fs::path pf = pfw;
+        for (auto ven : {L"Java", L"Eclipse Adoptium", L"Microsoft", L"Zulu", L"BellSoft", L"Amazon Corretto", L"AdoptOpenJDK", L"Semeru", L"Eclipse Foundation"})
+            scan(pf / ven);
     }
-    for (auto& e : fs::directory_iterator(gRoot / "runtime", ec)) { add(e.path()); scan(e.path()); }
-    fs::path mc = fs::path(home) / ".minecraft" / "runtime"; // Java от официального лаунчера
-    if (fs::is_directory(mc, ec))
+    std::wstring jh = Env(L"JAVA_HOME"); if (!jh.empty()) add(fs::path(jh));
+    for (auto& e : fs::directory_iterator(gRoot / "runtime", ec)) scan(e.path());
+    std::wstring ad = Env(L"APPDATA");
+    fs::path mc = fs::path(ad) / ".minecraft" / "runtime"; // Java от официального лаунчера
+    if (!ad.empty() && fs::is_directory(mc, ec))
         for (auto it = fs::recursive_directory_iterator(mc, ec); it != fs::recursive_directory_iterator(); it.increment(ec)) {
             if (ec) break;
-            if (it->path().filename() == "java" && it->path().parent_path().filename() == "bin") homes.push_back(it->path().parent_path().parent_path());
+            if (it->path().filename() == L"java.exe") homes.push_back(it->path().parent_path().parent_path());
         }
     std::set<std::string> seen; std::vector<JavaInfo> out;
     for (auto& h : homes) {
-        std::error_code e2; std::string key = PS(fs::weakly_canonical(h, e2)); if (!seen.insert(key).second) continue;
-        if (!HasAwt(h)) continue;
-        int m = JavaMajorFromHome(h); if (m <= 0) m = MajorFromName(PS(h.filename())); if (m <= 0) continue;
-        out.push_back({PS(h / "bin" / "java"), m});
+        std::string key = PS(h); if (!seen.insert(key).second) continue;
+        int m = JavaMajorFromHome(h); if (m <= 0) continue;
+        out.push_back({PS(h / "bin" / "java.exe"), m});
     }
     std::sort(out.begin(), out.end(), [](auto& a, auto& b) { return a.major < b.major; });
     return out;
@@ -316,21 +323,21 @@ static std::string PickJava(int need) {
 }
 static bool InstallJavaVer(int need) { // скачать и распаковать Temurin JRE нужной версии
     Status("Скачиваю Java " + std::to_string(need) + " (Temurin)...");
-    fs::path tgz = gRoot / "runtime" / ("temurin-" + std::to_string(need) + ".tar.gz");
-    std::string arch = HostArch() == "arm64" ? "aarch64" : "x64";
-    std::string url = "https://api.adoptium.net/v3/binary/latest/" + std::to_string(need) + "/ga/linux/" + arch + "/jre/hotspot/normal/eclipse";
-    if (!Download(url, tgz, true)) return false;
-    fs::path dst = gRoot / "runtime" / std::to_string(need); std::error_code ec; fs::create_directories(dst, ec);
-    std::string cap; int code = RunProcess("tar -xzf " + Q(PS(tgz)) + " -C " + Q(PS(dst)), gRoot, cap);
-    fs::remove(tgz, ec);
-    return code == 0;
+    fs::path zip = gRoot / "runtime" / ("temurin-" + std::to_string(need) + ".zip");
+    std::string url = "https://api.adoptium.net/v3/binary/latest/" + std::to_string(need) + "/ga/windows/x64/jre/hotspot/normal/eclipse";
+    if (!Download(url, zip, true)) return false;
+    Unzip(zip, gRoot / "runtime" / std::to_string(need));
+    std::error_code ec; fs::remove(zip, ec);
+    return true;
 }
 static std::string EnsureJava(int need) {
     std::string j = PickJava(need); if (!j.empty()) return j;
     if (!InstallJavaVer(need)) return "";
     return PickJava(need);
 }
-static std::string JavaExe(std::string p) { return p; } // на Linux один бинарник java
+static std::string JavaExe(std::string p) { // javaw.exe -> java.exe (нужен вывод в консоль)
+    auto k = p.rfind("javaw.exe"); if (k != std::string::npos) p.replace(k, 9, "java.exe"); return p;
+}
 
 // ============================ Версии ============================
 struct Ver { std::string id, type, url; };
@@ -489,8 +496,8 @@ static bool RuleOk(const json& rules) {
         bool m = true;
         if (r.contains("os")) {
             auto& o = r["os"];
-            if (o.contains("name") && o["name"] != "linux") m = false;
-            if (o.contains("arch") && o["arch"] != HostArch()) m = false; // x86 / arm64 для чужой архитектуры
+            if (o.contains("name") && o["name"] != "windows") m = false;
+            if (o.contains("arch") && o["arch"] == "x86") m = false;
         }
         if (r.contains("features")) m = false; // demo / custom resolution и т.п. — выключено
         if (m) ok = (r.value("action", "allow") == "allow");
@@ -555,8 +562,8 @@ static void Prepare(const json& v, const std::string& launchId, const fs::path& 
             if (!fs::exists(f) && !url.empty()) jobs.push_back({url, f});
             cp.push_back(PS(f));
         }
-        if (lib.contains("natives") && lib["natives"].contains("linux") && hasDl && lib["downloads"].contains("classifiers")) {
-            std::string c = lib["natives"]["linux"].get<std::string>();
+        if (lib.contains("natives") && lib["natives"].contains("windows") && hasDl && lib["downloads"].contains("classifiers")) {
+            std::string c = lib["natives"]["windows"].get<std::string>();
             auto k = c.find("${arch}"); if (k != std::string::npos) c.replace(k, 7, "64");
             auto& cls = lib["downloads"]["classifiers"];
             if (cls.contains(c)) {
@@ -599,15 +606,15 @@ static void Prepare(const json& v, const std::string& launchId, const fs::path& 
         }
     }
     cp.push_back(PS(jar));
-    for (size_t i = 0; i < cp.size(); i++) o.cp += (i ? ":" : "") + cp[i];
+    for (size_t i = 0; i < cp.size(); i++) o.cp += (i ? ";" : "") + cp[i];
 }
 
 // ============================ Fabric / Forge ============================
 static std::string FindInstalled(const std::string& prefix, const std::string& suffix) {
     std::error_code ec;
     for (auto& e : fs::directory_iterator(gRoot / "versions", ec)) {
-        std::string n = U8(e.path().filename().string());
-        if (n.rfind(prefix, 0) == 0 && n.size() >= suffix.size() && n.compare(n.size() - suffix.size(), suffix.size(), suffix) == 0 && fs::exists(e.path() / (e.path().filename().string() + ".json"), ec)) return n;
+        std::string n = U8(e.path().filename().wstring());
+        if (n.rfind(prefix, 0) == 0 && n.size() >= suffix.size() && n.compare(n.size() - suffix.size(), suffix.size(), suffix) == 0 && fs::exists(e.path() / (e.path().filename().wstring() + L".json"), ec)) return n;
     }
     return "";
 }
@@ -615,7 +622,7 @@ static std::vector<std::string> LoaderProfiles(const std::string& loader, const 
     std::vector<std::string> r; std::error_code ec;
     for (auto& e : fs::directory_iterator(gRoot / "versions", ec)) {
         if (!e.is_directory(ec)) continue;
-        std::string n = U8(e.path().filename().string()); bool ok = false;
+        std::string n = U8(e.path().filename().wstring()); bool ok = false;
         auto starts = [&](const std::string& p) { return n.rfind(p, 0) == 0; };
         auto ends = [&](const std::string& x) { return n.size() >= x.size() && n.compare(n.size() - x.size(), x.size(), x) == 0; };
         if (loader == "Fabric") ok = starts("fabric-loader-") && ends("-" + mc);
@@ -623,7 +630,7 @@ static std::vector<std::string> LoaderProfiles(const std::string& loader, const 
         else if (loader == "Forge") ok = starts(mc + "-forge-");
         else if (loader == "OptiFine") ok = starts(mc + "-OptiFine_");
         else if (loader == "NeoForge" && starts("neoforge-")) {
-            json j = Parse(ReadAll(e.path() / (e.path().filename().string() + ".json")));
+            json j = Parse(ReadAll(e.path() / (e.path().filename().wstring() + L".json")));
             ok = j.is_object() && j.contains("inheritsFrom") && j["inheritsFrom"].is_string() && j["inheritsFrom"].get<std::string>() == mc;
         }
         if (ok) r.push_back(n);
@@ -740,7 +747,7 @@ static std::string InstallOptiFine(const std::string& mc, const std::string& jav
         if (j.is_array()) for (auto& x : j) {
             if (!x.is_object() || !x.contains("type") || !x.contains("patch") || !x["type"].is_string() || !x["patch"].is_string()) continue;
             OfV o{x["type"].get<std::string>(), x["patch"].get<std::string>()};
-            if (!o.type.empty() && !o.patch.empty()) cands.push_back(o);
+            if (!o.type.empty() && !o.patch.empty()) OfAdd(*std::make_unique<std::map<std::string, std::vector<OfV>>>().get(), mc, o), cands.push_back(o);
         }
     }
     CheckCancel();
@@ -759,9 +766,7 @@ static std::string InstallOptiFine(const std::string& mc, const std::string& jav
             CheckCancel();
             bool official = a < 2; int tryNo = a % 2 + 1; const char* src = official ? "optifine.net" : "зеркало";
             Status("Скачиваю OptiFine " + full + " (" + src + ", попытка " + std::to_string(tryNo) + "/2)...");
-            gNetSafe = tryNo > 1; gNetTimeout = 120;
             std::string why; Resp rr = official ? OfHttpOfficial(curFile, why) : Http(ofUrl);
-            gNetSafe = false; gNetTimeout = 0;
             if (rr.status == 200 && !rr.body.empty()) {
                 WriteAll(inst, rr.body);
                 if (ZipHasEntry(inst, "optifine/Patcher.class")) return true;
@@ -830,65 +835,35 @@ static std::string InstallOptiFine(const std::string& mc, const std::string& jav
     return id;
 }
 
-// ============================ Выбор видеокарты (Linux: PRIME offload) ============================
-static std::vector<std::pair<std::string, std::string>> gGameEnv; static std::mutex gEnvMu;
-static void ApplyGpuPref(const std::string&, int mode) { // 0 авто, 1 встроенная (экономия), 2 дискретная (производительность)
-    std::lock_guard<std::mutex> l(gEnvMu); gGameEnv.clear();
-    if (mode == 1) { gGameEnv = {{"DRI_PRIME", "0"}, {"__NV_PRIME_RENDER_OFFLOAD", "0"}}; }
-    else if (mode == 2) { gGameEnv = {{"DRI_PRIME", "1"}, {"__NV_PRIME_RENDER_OFFLOAD", "1"}, {"__GLX_VENDOR_LIBRARY_NAME", "nvidia"}, {"__VK_LAYER_NV_optimus", "NVIDIA_only"}}; }
+// ============================ Выбор видеокарты (Windows) ============================
+static void ApplyGpuPref(const std::string& exe, int mode) { // 0 авто, 1 встроенная (экономия), 2 дискретная (производительность)
+    HKEY k; if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\DirectX\\UserGpuPreference", 0, nullptr, 0, KEY_SET_VALUE, nullptr, &k, nullptr) != ERROR_SUCCESS) return;
+    std::wstring name = W(exe);
+    if (mode == 0) RegDeleteValueW(k, name.c_str());
+    else { std::wstring v = mode == 2 ? L"GpuPreference=2;" : L"GpuPreference=1;"; RegSetValueExW(k, name.c_str(), 0, REG_SZ, (const BYTE*)v.c_str(), (DWORD)((v.size() + 1) * sizeof(wchar_t))); }
+    RegCloseKey(k);
 }
 
 // ============================ Запуск процесса и разбор крашей ============================
-static std::vector<std::string> SplitCmd(const std::string& s) { // обратная операция к Q(): разбор строки команды в argv (правила как в CommandLineToArgv)
-    std::vector<std::string> out; std::string cur; bool inq = false, has = false;
-    for (size_t i = 0; i < s.size(); i++) {
-        char c = s[i];
-        if (c == '\\') {
-            size_t j = i; while (j < s.size() && s[j] == '\\') j++;
-            size_t n = j - i; has = true;
-            if (j < s.size() && s[j] == '"') { cur.append(n / 2, '\\'); if (n % 2) { cur += '"'; i = j; } else i = j - 1; }
-            else { cur.append(n, '\\'); i = j - 1; }
-            continue;
-        }
-        if (c == '"') { inq = !inq; has = true; continue; }
-        if ((c == ' ' || c == '\t') && !inq) { if (has) { out.push_back(cur); cur.clear(); has = false; } continue; }
-        cur += c; has = true;
-    }
-    if (has) out.push_back(cur);
-    return out;
-}
 static int RunProcess(const std::string& cmd, const fs::path& cwd, std::string& captured) {
-    std::vector<std::string> args = SplitCmd(cmd); if (args.empty()) { captured = "empty command"; return -1; }
-    std::vector<char*> av; for (auto& a : args) av.push_back(&a[0]); av.push_back(nullptr);
-    std::vector<std::string> envs; for (char** e = environ; e && *e; e++) envs.push_back(*e);
-    { std::lock_guard<std::mutex> l(gEnvMu);
-      for (auto& kv : gGameEnv) {
-          std::string pre = kv.first + "=";
-          envs.erase(std::remove_if(envs.begin(), envs.end(), [&](const std::string& e) { return e.rfind(pre, 0) == 0; }), envs.end());
-          envs.push_back(pre + kv.second);
-      } }
-    std::vector<char*> ev; for (auto& e : envs) ev.push_back(&e[0]); ev.push_back(nullptr);
-    int pfd[2]; if (pipe2(pfd, O_CLOEXEC) != 0) { captured = "pipe failed"; return -1; }
-    std::string cwdS = PS(cwd);
-    pid_t pid = fork();
-    if (pid < 0) { close(pfd[0]); close(pfd[1]); captured = "fork failed"; return -1; }
-    if (pid == 0) {
-        setpgid(0, 0); // своя группа процессов: «Остановить/Закрыть» убивает и обёртки (gamemoderun и т.п.)
-        dup2(pfd[1], 1); dup2(pfd[1], 2);
-        int dn = open("/dev/null", O_RDONLY); if (dn >= 0) { dup2(dn, 0); if (dn > 2) close(dn); }
-        if (!cwdS.empty() && chdir(cwdS.c_str()) != 0) { /* остаёмся в текущей папке */ }
-        execvpe(av[0], av.data(), ev.data());
-        static const char m[] = "exec failed: command not found or not executable\n"; if (write(2, m, sizeof(m) - 1) < 0) {}
-        _exit(127);
-    }
-    close(pfd[1]);
-    setpgid(pid, pid); gChildPid = pid; if (gCancel) kill(-pid, SIGTERM);
-    std::string part; char buf[4096]; ssize_t n;
-    for (;;) {
-        n = read(pfd[0], buf, sizeof(buf));
-        if (n < 0 && errno == EINTR) continue;
-        if (n <= 0) break;
-        part.append(buf, (size_t)n); size_t p;
+    SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
+    HANDLE rd = nullptr, wr = nullptr;
+    if (!CreatePipe(&rd, &wr, &sa, 0)) return -1;
+    SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
+    STARTUPINFOW si{}; si.cb = sizeof(si); si.dwFlags = STARTF_USESTDHANDLES; si.hStdOutput = wr; si.hStdError = wr;
+    PROCESS_INFORMATION pi{};
+    std::wstring cl = W(cmd);
+    BOOL ok = CreateProcessW(nullptr, &cl[0], nullptr, nullptr, TRUE, CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, cwd.wstring().c_str(), &si, &pi);
+    CloseHandle(wr);
+    if (!ok) { CloseHandle(rd); captured = "CreateProcess failed: " + std::to_string(GetLastError()); return -1; }
+    HANDLE job = CreateJobObjectW(nullptr, nullptr); // в одну «группу» с дочерними процессами: «Остановить/Закрыть» убирает всё дерево
+    bool inJob = job && AssignProcessToJobObject(job, pi.hProcess);
+    { std::lock_guard<std::mutex> l(gProcMu); gChildPid = pi.dwProcessId; gChildProc = pi.hProcess; gChildJob = inJob ? job : nullptr; }
+    ResumeThread(pi.hThread);
+    if (gCancel) ProcHardKill(pi.dwProcessId);
+    std::string part; char buf[4096]; DWORD n;
+    while (ReadFile(rd, buf, sizeof(buf), &n, nullptr) && n) {
+        part.append(buf, n); size_t p;
         while ((p = part.find('\n')) != std::string::npos) {
             std::string line = part.substr(0, p); if (!line.empty() && line.back() == '\r') line.pop_back();
             Log(line); captured += line + "\n"; part.erase(0, p + 1);
@@ -896,12 +871,12 @@ static int RunProcess(const std::string& cmd, const fs::path& cwd, std::string& 
         if (captured.size() > 400000) captured.erase(0, 200000);
     }
     if (!part.empty()) { Log(part); captured += part; }
-    close(pfd[0]);
-    int st = 0; while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
-    gChildPid = 0;
-    if (WIFEXITED(st)) return WEXITSTATUS(st);
-    if (WIFSIGNALED(st)) return 128 + WTERMSIG(st);
-    return -1;
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD code = 0; GetExitCodeProcess(pi.hProcess, &code);
+    { std::lock_guard<std::mutex> l(gProcMu); gChildPid = 0; gChildProc = nullptr; gChildJob = nullptr; }
+    if (job) CloseHandle(job);
+    CloseHandle(pi.hProcess); CloseHandle(pi.hThread); CloseHandle(rd);
+    return (int)code;
 }
 static std::pair<std::string, std::string> Analyze(int code, const std::string& t) {
     auto has = [&](const char* s) { return t.find(s) != std::string::npos; };
@@ -929,8 +904,8 @@ static std::pair<std::string, std::string> Analyze(int code, const std::string& 
         return {"Проблема с сетью", "Не получилось скачать что-то по сети. Проверь интернет, VPN, антивирус/фаервол."};
     if (has("Invalid session") || has("Failed to verify username") || has("Bad login"))
         return {"Проблема с аккаунтом", "Сессия недействительна. Перелогинься во вкладке «Аккаунт»."};
-    if (code == -1073741819 || code == (int)0xC0000005 || code == 139)
-        return {"Аварийное закрытие процесса (0xC0000005 / SIGSEGV)", "Чаще всего виноваты драйвер видеокарты, оверлеи (Discord, MSI Afterburner, GeForce Experience) или антивирус. Отключи оверлеи и обнови драйвер."};
+    if (code == -1073741819 || code == (int)0xC0000005)
+        return {"Аварийное закрытие процесса (0xC0000005)", "Чаще всего виноваты драйвер видеокарты, оверлеи (Discord, MSI Afterburner, GeForce Experience) или антивирус. Отключи оверлеи и обнови драйвер."};
     std::string hint; size_t p = t.find("Exception in thread");
     if (p == std::string::npos) p = t.find("Caused by:");
     if (p != std::string::npos) { size_t e = t.find('\n', p); hint = "\n\nПохоже на:\n" + t.substr(p, std::min<size_t>(e == std::string::npos ? 300 : e - p, 300)); }
@@ -946,33 +921,13 @@ static bool ValidNick(const std::string& n) {
 static const char* kNickHint = "Ник: 3-16 символов, только латиница, цифры и _";
 static std::string JStr(const json& j, const char* k) { return (j.is_object() && j.contains(k) && j[k].is_string()) ? j[k].get<std::string>() : std::string(); }
 static std::string FirstLine(const std::string& s) { size_t p = s.find_first_of("\r\n"); return p == std::string::npos ? s : s.substr(0, p); }
-static void Md5(const unsigned char* data, size_t len, unsigned char out[16]) { // RFC 1321 (для offline-UUID как в Java: UUID.nameUUIDFromBytes)
-    static uint32_t K[64]; static bool init = false;
-    static const int Rr[64] = {7,12,17,22,7,12,17,22,7,12,17,22,7,12,17,22, 5,9,14,20,5,9,14,20,5,9,14,20,5,9,14,20,
-                               4,11,16,23,4,11,16,23,4,11,16,23,4,11,16,23, 6,10,15,21,6,10,15,21,6,10,15,21,6,10,15,21};
-    if (!init) { for (int i = 0; i < 64; i++) K[i] = (uint32_t)(4294967296.0 * std::fabs(std::sin((double)(i + 1)))); init = true; }
-    std::string m((const char*)data, len); m += (char)0x80;
-    while (m.size() % 64 != 56) m += (char)0;
-    uint64_t bits = (uint64_t)len * 8; for (int i = 0; i < 8; i++) m += (char)((bits >> (8 * i)) & 0xff);
-    uint32_t a0 = 0x67452301, b0 = 0xefcdab89, c0 = 0x98badcfe, d0 = 0x10325476;
-    for (size_t off = 0; off < m.size(); off += 64) {
-        uint32_t M[16]; for (int i = 0; i < 16; i++) { const unsigned char* q = (const unsigned char*)m.data() + off + i * 4; M[i] = q[0] | (q[1] << 8) | (q[2] << 16) | ((uint32_t)q[3] << 24); }
-        uint32_t A = a0, B = b0, C = c0, D = d0;
-        for (int i = 0; i < 64; i++) {
-            uint32_t F; int g;
-            if (i < 16) { F = (B & C) | (~B & D); g = i; }
-            else if (i < 32) { F = (D & B) | (~D & C); g = (5 * i + 1) % 16; }
-            else if (i < 48) { F = B ^ C ^ D; g = (3 * i + 5) % 16; }
-            else { F = C ^ (B | ~D); g = (7 * i) % 16; }
-            F = F + A + K[i] + M[g]; A = D; D = C; C = B; B = B + ((F << Rr[i]) | (F >> (32 - Rr[i])));
-        }
-        a0 += A; b0 += B; c0 += C; d0 += D;
-    }
-    uint32_t r[4] = {a0, b0, c0, d0}; for (int i = 0; i < 4; i++) for (int j = 0; j < 4; j++) out[i * 4 + j] = (unsigned char)((r[i] >> (8 * j)) & 0xff);
-}
 static std::string OfflineUuid(const std::string& name) {
-    std::string s = "OfflinePlayer:" + name; unsigned char d[16] = {0};
-    Md5((const unsigned char*)s.data(), s.size(), d);
+    std::string s = "OfflinePlayer:" + name; HCRYPTPROV pv = 0; HCRYPTHASH h = 0; BYTE d[16] = {0}; DWORD n = 16;
+    CryptAcquireContextW(&pv, 0, 0, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT);
+    CryptCreateHash(pv, CALG_MD5, 0, 0, &h);
+    CryptHashData(h, (const BYTE*)s.data(), (DWORD)s.size(), 0);
+    CryptGetHashParam(h, HP_HASHVAL, d, &n, 0);
+    CryptDestroyHash(h); CryptReleaseContext(pv, 0);
     d[6] = (d[6] & 0x0f) | 0x30; d[8] = (d[8] & 0x3f) | 0x80;
     static const char* hx = "0123456789abcdef"; std::string r;
     for (int i = 0; i < 16; i++) { r += hx[d[i] >> 4]; r += hx[d[i] & 15]; }
@@ -1032,7 +987,7 @@ static void MsLoginThread() {
         }
         std::string uri = d.value("verification_uri", "https://microsoft.com/link");
         { std::lock_guard<std::mutex> l(gMu); gMsCode = d.value("user_code", ""); gMsUri = uri; }
-        OpenExternal(uri);
+        ShellExecuteW(0, L"open", W(uri).c_str(), 0, 0, SW_SHOWNORMAL);
         int interval = d.value("interval", 5), left = d.value("expires_in", 900);
         while (left > 0) {
             Sleep(interval * 1000); left -= interval;
@@ -1136,7 +1091,7 @@ static std::string InstName(const std::string& loader, const std::string& mc) {
 }
 static void MigrateInstances() { // старые имена (fabric-loader-0.16.9-1.21.1, 1.20.1-forge-47.2.0) -> новые
     std::error_code ec; fs::path root = gRoot / "instances"; std::vector<std::string> names;
-    for (auto& e : fs::directory_iterator(root, ec)) if (e.is_directory(ec)) names.push_back(U8(e.path().filename().string()));
+    for (auto& e : fs::directory_iterator(root, ec)) if (e.is_directory(ec)) names.push_back(U8(e.path().filename().wstring()));
     for (auto& n : names) {
         std::string mc, ld;
         if (n.rfind("fabric-loader-", 0) == 0) { std::string rest = n.substr(14); size_t p = rest.find('-'); if (p != std::string::npos) { ld = "Fabric"; mc = rest.substr(p + 1); } }
@@ -1182,7 +1137,7 @@ static bool LoadBuild(const std::string& id, Build& b) {
 }
 static std::vector<Build> ListBuilds() {
     std::vector<Build> v; std::error_code ec;
-    for (auto& e : fs::directory_iterator(gRoot / "instances", ec)) if (e.is_directory(ec)) { Build b; if (LoadBuild(U8(e.path().filename().string()), b)) v.push_back(b); }
+    for (auto& e : fs::directory_iterator(gRoot / "instances", ec)) if (e.is_directory(ec)) { Build b; if (LoadBuild(U8(e.path().filename().wstring()), b)) v.push_back(b); }
     std::sort(v.begin(), v.end(), [](const Build& a, const Build& b) { return a.created != b.created ? a.created < b.created : a.id < b.id; });
     return v;
 }
@@ -1237,14 +1192,15 @@ static std::vector<std::pair<std::string, std::string>> ParseEnvText(const std::
     }
     return r;
 }
-struct EnvGuard { // выставляет переменные окружения на время запуска и возвращает как было (RunProcess читает environ)
-    std::vector<std::pair<std::string, std::optional<std::string>>> old;
+struct EnvGuard { // выставляет переменные окружения на время запуска и возвращает как было
+    std::vector<std::pair<std::wstring, std::optional<std::wstring>>> old;
     void Set(const std::string& k, const std::string& v) {
-        const char* o = getenv(k.c_str());
-        if (o) old.push_back({k, std::string(o)}); else old.push_back({k, std::nullopt});
-        setenv(k.c_str(), v.c_str(), 1);
+        std::wstring wk = W(k); DWORD n = GetEnvironmentVariableW(wk.c_str(), nullptr, 0);
+        if (n > 0) { std::wstring o(n, L'\0'); GetEnvironmentVariableW(wk.c_str(), &o[0], n); o.resize(n - 1); old.push_back({wk, o}); }
+        else old.push_back({wk, std::nullopt});
+        SetEnvironmentVariableW(wk.c_str(), W(v).c_str());
     }
-    ~EnvGuard() { for (size_t i = old.size(); i-- > 0;) { if (old[i].second) setenv(old[i].first.c_str(), old[i].second->c_str(), 1); else unsetenv(old[i].first.c_str()); } }
+    ~EnvGuard() { for (size_t i = old.size(); i-- > 0;) SetEnvironmentVariableW(old[i].first.c_str(), old[i].second ? old[i].second->c_str() : nullptr); }
 };
 
 static void SetGameDir(const std::string& d) { // пустая строка = стандартная папка
@@ -1299,7 +1255,7 @@ static void LaunchThread(Config c, Account acc) {
             {"assets_index_name", pp.assetsId}, {"auth_uuid", acc.uuid}, {"auth_access_token", acc.type == 0 ? "0" : acc.token}, {"clientid", ""}, {"auth_xuid", ""},
             {"user_type", acc.type == 2 ? "msa" : (acc.type == 1 ? "mojang" : "legacy")}, {"version_type", lv.value("type", "release")},
             {"natives_directory", PS(pp.natives)}, {"launcher_name", kAppName}, {"launcher_version", kVer}, {"classpath", pp.cp},
-            {"classpath_separator", ":"}, {"library_directory", PS(gRoot / "libraries")}, {"game_assets", pp.gameAssets},
+            {"classpath_separator", ";"}, {"library_directory", PS(gRoot / "libraries")}, {"game_assets", pp.gameAssets},
             {"auth_session", acc.token}, {"user_properties", "{}"}};
         std::string base = lv.value("_base", c.version);
         auto addArgs = [&](const json& arr, std::vector<std::string>& out) {
@@ -1346,7 +1302,7 @@ static void LaunchThread(Config c, Account acc) {
         if (ic.cmdOv && !ic.wrapper.empty()) cmd = sd(ic.wrapper) + " " + cmd;
         if (ic.cmdOv && !ic.pre.empty()) {
             Status("Выполняю команду перед запуском...");
-            std::string pc; int pcode = RunProcess("/bin/sh -c " + Q(sd(ic.pre)), gameDir, pc);
+            std::string pc; int pcode = RunProcess("cmd.exe /S /C \"" + sd(ic.pre) + "\"", gameDir, pc);
             if (pcode != 0) throw std::runtime_error("Команда перед запуском завершилась с кодом " + std::to_string(pcode) + ", игра не запущена.");
         }
 
@@ -1356,7 +1312,7 @@ static void LaunchThread(Config c, Account acc) {
         if (act == 1 || act == 2) std::thread([act] { // свернуть/закрыть лаунчер, если игра успешно стартовала и не упала
             for (int i = 0; i < (act == 1 ? 8 : 40) && gGameRunning; i++) Sleep(500);
             if (!gGameRunning) return;
-            gWinCmd = (act == 1) ? 1 : 3;
+            if (act == 1) PostMessageW(gHwnd, WM_APP_HIDE, 0, 0); else PostMessageW(gHwnd, WM_CLOSE, 0, 0);
         }).detach();
         Log("Запуск: " + bm.name + " (" + c.loader + " " + c.version + "), профиль " + launchId + ", Java " + std::to_string(need2) + ", память " + std::to_string(xmx) + " МБ");
         auto t0 = std::chrono::steady_clock::now(); std::string cap; int code = RunProcess(cmd, gameDir, cap);
@@ -1364,8 +1320,8 @@ static void LaunchThread(Config c, Account acc) {
         Log("Игра завершилась с кодом " + std::to_string(code) + " (" + std::to_string(secs) + " с)");
         if (secs >= 3) { bm.playSec += secs; bm.launches++; bm.lastPlayed = (long long)time(nullptr); SaveBuild(bm); gStatSec += secs; gStatLaunch += 1; }
         gGameRunning = false;
-        if (ic.cmdOv && !ic.post.empty()) { std::string pc2; RunProcess("/bin/sh -c " + Q(sd(ic.post)), gameDir, pc2); }
-        if (act == 1) gWinCmd = 2; // игра закрылась - вернуть лаунчер из фона
+        if (ic.cmdOv && !ic.post.empty()) { std::string pc2; RunProcess("cmd.exe /S /C \"" + sd(ic.post) + "\"", gameDir, pc2); }
+        if (act == 1) PostMessageW(gHwnd, WM_APP_SHOW, 0, 0); // игра закрылась - вернуть лаунчер из фона
         if (gCancel) Status("Игра закрыта"); // закрыта кнопкой «Закрыть» — это не крэш
         else if (code != 0) { auto [t, b] = Analyze(code, cap); Status("Игра завершилась с ошибкой: " + t); ShowError(t, b); }
         else Status("Игра закрыта");
@@ -1378,12 +1334,15 @@ static void LaunchThread(Config c, Account acc) {
 // Кнопка «Остановить» (идёт загрузка/установка) и «Закрыть» (игра уже запущена)
 static void StopLaunch() {
     if (!gBusy || gCancel) return;
+    bool game = gGameRunning;
     gCancel = true;
-    Status(gGameRunning ? "Закрываю игру..." : "Останавливаю...");
-    pid_t p = gChildPid; if (p > 0) kill(-p, SIGTERM);
-    std::thread([p] { // если процесс не завершился сам за ~8 секунд — добиваем
-        for (int i = 0; i < 80 && gChildPid == p && p > 0; i++) Sleep(100);
-        if (p > 0 && gChildPid == p) kill(-p, SIGKILL);
+    Status(game ? "Закрываю игру..." : "Останавливаю...");
+    AbortHttp(); // прерываем текущие загрузки
+    DWORD pid; { std::lock_guard<std::mutex> l(gProcMu); pid = gChildPid; }
+    if (pid) { if (game) ProcSoftClose(pid); else ProcHardKill(pid); } // игре сначала даём закрыться как обычно (сохранить мир)
+    std::thread([pid] { // если процесс не завершился сам за ~8 секунд — добиваем
+        for (int i = 0; i < 80 && ChildIs(pid); i++) Sleep(100);
+        if (ChildIs(pid)) ProcHardKill(pid);
     }).detach();
 }
 static bool AddOffline(const std::string& name) {
@@ -1403,7 +1362,8 @@ static void StartLaunch() {
 }
 
 // ============================ Фон: скриншоты ============================
-struct Tex { GLuint v = 0; int w = 0, h = 0; };
+static ID3D11Device* gDev; static ID3D11DeviceContext* gCtx; static IDXGISwapChain* gSwap; static ID3D11RenderTargetView* gRTV;
+struct Tex { ID3D11ShaderResourceView* v = nullptr; int w = 0, h = 0; };
 static Tex gBg[2]; static float gFade = 1, gSlideT = 0, gTime = 0;
 static std::string gBgNow; static std::vector<std::string> gShots;
 static std::mutex gImgMu; static std::vector<unsigned char> gImgData; static int gImgW, gImgH; static bool gImgReady = false;
@@ -1428,22 +1388,21 @@ static void LoadBgAsync(std::string path) {
         gImgLoading = false;
     }).detach();
 }
-static GLuint MakeTex(const unsigned char* px, int w, int h) {
-    GLuint t = 0; glGenTextures(1, &t); glBindTexture(GL_TEXTURE_2D, t);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, 0x812F); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, 0x812F); // GL_CLAMP_TO_EDGE
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
-    return t;
+static ID3D11ShaderResourceView* MakeTex(const unsigned char* px, int w, int h) {
+    D3D11_TEXTURE2D_DESC d{}; d.Width = w; d.Height = h; d.MipLevels = 1; d.ArraySize = 1; d.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    d.SampleDesc.Count = 1; d.Usage = D3D11_USAGE_IMMUTABLE; d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    D3D11_SUBRESOURCE_DATA sd{px, (UINT)w * 4, 0}; ID3D11Texture2D* t = nullptr;
+    if (FAILED(gDev->CreateTexture2D(&d, &sd, &t))) return nullptr;
+    ID3D11ShaderResourceView* v = nullptr; gDev->CreateShaderResourceView(t, nullptr, &v); t->Release(); return v;
 }
 static void ScanShots() {
     gShots.clear(); std::error_code ec; std::vector<fs::path> dirs;
     if (!cfg.shotsDir.empty()) dirs.push_back(P(cfg.shotsDir));
-    else dirs.push_back(fs::path(HomeDir()) / ".minecraft" / "screenshots");
+    else dirs.push_back(fs::path(Env(L"APPDATA")) / ".minecraft" / "screenshots");
     for (auto& e : fs::directory_iterator(gRoot / "instances", ec)) dirs.push_back(e.path() / "screenshots");
     for (auto& d : dirs) for (auto& e : fs::directory_iterator(d, ec)) {
-        std::string x = e.path().extension().string(); for (auto& ch : x) ch = (char)tolower((unsigned char)ch);
-        if (x == ".png" || x == ".jpg" || x == ".jpeg" || x == ".bmp") gShots.push_back(PS(e.path()));
+        std::wstring x = e.path().extension().wstring(); for (auto& ch : x) ch = (wchar_t)towlower(ch);
+        if (x == L".png" || x == L".jpg" || x == L".jpeg" || x == L".bmp") gShots.push_back(PS(e.path()));
     }
 }
 static void NextShot() {
@@ -1454,7 +1413,7 @@ static void UpdateBackground(float dt) {
     {
         std::lock_guard<std::mutex> l(gImgMu);
         if (gImgReady) {
-            if (gBg[1].v) glDeleteTextures(1, &gBg[1].v);
+            if (gBg[1].v) gBg[1].v->Release();
             gBg[1] = gBg[0]; gBg[0] = {MakeTex(gImgData.data(), gImgW, gImgH), gImgW, gImgH};
             gImgData.clear(); gImgData.shrink_to_fit(); gImgReady = false; gFade = 0;
         }
@@ -1462,22 +1421,20 @@ static void UpdateBackground(float dt) {
     gFade = std::min(1.f, gFade + dt * 1.2f);
     if (cfg.slideshow && gShots.size() > 1) { gSlideT += dt; if (gSlideT > 18.f) { gSlideT = 0; NextShot(); } }
 }
-static std::string RunCapture(const std::string& cmd) {
-    FILE* f = popen(cmd.c_str(), "r"); if (!f) return "";
-    std::string r; char b[1024]; size_t n; while ((n = fread(b, 1, sizeof(b), f)) > 0) r.append(b, n);
-    pclose(f); while (!r.empty() && (r.back() == '\n' || r.back() == '\r')) r.pop_back();
+static std::string PickFolder(HWND hw) {
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    wchar_t disp[MAX_PATH] = {0};
+    BROWSEINFOW bi{}; bi.hwndOwner = hw; bi.pszDisplayName = disp; bi.lpszTitle = L"Выбери папку для игры"; bi.ulFlags = BIF_NEWDIALOGSTYLE | BIF_RETURNONLYFSDIRS;
+    LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
+    std::string r;
+    if (pidl) { wchar_t path[MAX_PATH]; if (SHGetPathFromIDListW(pidl, path)) r = U8(path); CoTaskMemFree(pidl); }
     return r;
 }
-static bool HaveCmd(const char* c) { return system((std::string("command -v ") + c + " >/dev/null 2>&1").c_str()) == 0; }
-static std::string PickFolder(void*) { // нужен zenity (GNOME/GTK) или kdialog (KDE)
-    if (HaveCmd("zenity")) return RunCapture("zenity --file-selection --directory --title=" + ShQ("Выбери папку для игры") + " 2>/dev/null");
-    if (HaveCmd("kdialog")) return RunCapture("kdialog --getexistingdirectory " + ShQ(HomeDir()) + " 2>/dev/null");
-    Status("Для выбора папки нужен zenity или kdialog (установи через менеджер пакетов)"); return "";
-}
-static std::string PickImage(void*) {
-    if (HaveCmd("zenity")) return RunCapture("zenity --file-selection --file-filter=" + ShQ("Изображения | *.png *.jpg *.jpeg *.bmp *.tga") + " 2>/dev/null");
-    if (HaveCmd("kdialog")) return RunCapture("kdialog --getopenfilename " + ShQ(HomeDir()) + " " + ShQ("*.png *.jpg *.jpeg *.bmp *.tga|Изображения") + " 2>/dev/null");
-    Status("Для выбора файла нужен zenity или kdialog (установи через менеджер пакетов)"); return "";
+static std::string PickImage(HWND hw) {
+    wchar_t f[MAX_PATH] = {0}; OPENFILENAMEW o{}; o.lStructSize = sizeof(o); o.hwndOwner = hw;
+    o.lpstrFilter = L"Изображения\0*.png;*.jpg;*.jpeg;*.bmp;*.tga\0Все файлы\0*.*\0"; o.lpstrFile = f; o.nMaxFile = MAX_PATH;
+    o.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    return GetOpenFileNameW(&o) ? U8(f) : "";
 }
 
 // ============================ UI ============================
@@ -1602,7 +1559,7 @@ static bool TrashBtn(const char* id, float sz, bool enabled = true) { // ква�
     DrawTrash(ImGui::GetWindowDrawList(), p, ImVec2(p.x + sz, p.y + sz), hov, enabled);
     ImGui::PopID(); return clk && enabled;
 }
-static void Open(const fs::path& p) { std::error_code ec; fs::create_directories(p, ec); OpenExternal(PS(p)); }
+static void Open(const fs::path& p) { std::error_code ec; fs::create_directories(p, ec); ShellExecuteW(0, L"open", p.wstring().c_str(), 0, 0, SW_SHOWNORMAL); }
 static std::string AccLabel(const Account& a) { return std::string(a.type == 0 ? T("[офлайн] ", "[offline] ") : a.type == 1 ? "[Ely.by] " : "[Microsoft] ") + a.name; }
 
 static void TabBar(const char* const* labels, int n, int& cur, bool fade = true) {
@@ -1892,7 +1849,7 @@ static void SkinTick() { // каждый кадр (UI-поток): запуст�
     if (!gDefTex.v) { SkinPx d = SkinDefault(); gDefTex = MakeTexUp(d); }
     std::lock_guard<std::mutex> l(gSkinMu);
     if (!gSkinReady) return; gSkinReady = false;
-    if (gSkinTex.v) { glDeleteTextures(1, &gSkinTex.v); gSkinTex = Tex(); } if (gCapeTex.v) { glDeleteTextures(1, &gCapeTex.v); gCapeTex = Tex(); }
+    if (gSkinTex.v) { gSkinTex.v->Release(); gSkinTex = Tex(); } if (gCapeTex.v) { gCapeTex.v->Release(); gCapeTex = Tex(); }
     if (gSkinRes.hasSkin) gSkinTex = MakeTexUp(gSkinRes.skin);
     gHasCape = gSkinRes.hasCape; if (gHasCape) gCapeTex = MakeTexUp(gSkinRes.cape);
     gSkinSlim = gSkinRes.slim; gSkinLocal = gSkinRes.local;
@@ -1941,7 +1898,7 @@ static void DrawSkinModel(ImDrawList* dl, ImVec2 c, float sc, bool follow, float
     }
     static std::vector<SFace> faces; faces.clear(); SkinBuildFaces(P, c.x, c.y, sc, faces);
     for (auto& f : faces) {
-        GLuint tv = f.tex == 0 ? (gSkinTex.v ? gSkinTex.v : gDefTex.v) : gCapeTex.v; if (!tv) continue;
+        ID3D11ShaderResourceView* tv = f.tex == 0 ? (gSkinTex.v ? gSkinTex.v : gDefTex.v) : gCapeTex.v; if (!tv) continue;
         int sh = (int)(255 * f.shade), al255 = (int)(255 * ImGui::GetStyle().Alpha);
         dl->AddImageQuad((ImTextureID)(intptr_t)tv, ImVec2(f.x[0], f.y[0]), ImVec2(f.x[1], f.y[1]), ImVec2(f.x[2], f.y[2]), ImVec2(f.x[3], f.y[3]),
                          ImVec2(f.u[0], f.v[0]), ImVec2(f.u[1], f.v[1]), ImVec2(f.u[2], f.v[2]), ImVec2(f.u[3], f.v[3]), IM_COL32(sh, sh, sh, al255));
@@ -1982,12 +1939,11 @@ static std::string FmtSize(long long b) {
     else snprintf(t, sizeof(t), "%.2f %s", v / 1073741824.0, T("ГБ", "GB"));
     return t;
 }
-static std::string FmtDate(const fs::path& p) { // дата создания папки = когда экземпляр скачан (btime, если ФС отдаёт; иначе mtime)
-    struct statx sx; if (statx(AT_FDCWD, p.c_str(), 0, STATX_BTIME | STATX_MTIME, &sx) != 0) return "?";
-    time_t t = (sx.stx_mask & STATX_BTIME) ? (time_t)sx.stx_btime.tv_sec : (time_t)sx.stx_mtime.tv_sec;
-    struct tm tmv; if (!localtime_r(&t, &tmv)) return "?";
-    char b[48]; snprintf(b, sizeof(b), "%02d.%02d.%04d %02d:%02d", tmv.tm_mday, tmv.tm_mon + 1, tmv.tm_year + 1900, tmv.tm_hour, tmv.tm_min);
-    return b;
+static std::string FmtDate(const fs::path& p) { // дата создания папки = когда экземпляр скачан
+    WIN32_FILE_ATTRIBUTE_DATA a{}; if (!GetFileAttributesExW(p.wstring().c_str(), GetFileExInfoStandard, &a)) return "?";
+    FILETIME lf; SYSTEMTIME st; if (!FileTimeToLocalFileTime(&a.ftCreationTime, &lf) || !FileTimeToSystemTime(&lf, &st)) return "?";
+    char t[48]; snprintf(t, sizeof(t), "%02d.%02d.%04d %02d:%02d", (int)st.wDay, (int)st.wMonth, (int)st.wYear, (int)st.wHour, (int)st.wMinute);
+    return t;
 }
 
 // ---------- Java: список установленных и установка ----------
@@ -2086,7 +2042,7 @@ static bool InstallModRec(const std::string& pid, const std::string& loader, con
     if (!pick->is_object() || !pick->contains("files") || !(*pick)["files"].is_array() || (*pick)["files"].empty()) return false;
     const json& files = (*pick)["files"]; const json* f = &files[0];
     for (auto& x : files) if (x.is_object() && x.contains("primary") && x["primary"].is_boolean() && x["primary"].get<bool>()) { f = &x; break; }
-    std::string fn = U8(fs::path(W(JStr(*f, "filename"))).filename().string()), url = JStr(*f, "url");
+    std::string fn = U8(fs::path(W(JStr(*f, "filename"))).filename().wstring()), url = JStr(*f, "url");
     if (fn.empty() || url.empty()) return false;
     fs::path dir = inst / "mods"; std::error_code ec; fs::create_directories(dir, ec);
     ModMsg(std::string(T("Скачиваю ", "Downloading ")) + fn);
@@ -2181,7 +2137,7 @@ static bool ComboI(const char* id, int& cur, const char* const* items, int n) {
     }
     return ch;
 }
-static void OpenUrl(const std::string& u) { OpenExternal(u); }
+static void OpenUrl(const std::string& u) { ShellExecuteW(0, L"open", W(u).c_str(), 0, 0, SW_SHOWNORMAL); }
 
 // ---------- Главный экран (по макету): сверху название и шестерёнка, по бокам кнопки, в центре скин, снизу «Создать сборку | ИГРАТЬ | аккаунт» ----------
 static void ScrMain() {
@@ -2286,10 +2242,10 @@ static void ScrSkins() {
     float bw = std::min(em * 22.f, ImGui::GetContentRegionAvail().x), bhh = em * 2.1f;
     ImGui::Dummy(ImVec2(0, em * .2f));
     if (FancyBtn(T("Выбрать скин (PNG)...", "Choose skin (PNG)..."), ImVec2(bw, bhh), gSoft)) {
-        std::string f = PickImage(nullptr);
+        std::string f = PickImage(gHwnd);
         if (!f.empty()) { cfg.skinPath = f; SkinPx t; if (LoadSkinFile(f, t)) { SkinFixLegacy(t); cfg.skinSlim = SkinIsSlim(t); } SaveConfig(); }
     }
-    if (FancyBtn(T("Выбрать плащ (PNG)...", "Choose cape (PNG)..."), ImVec2(bw, bhh), gSoft)) { std::string f = PickImage(nullptr); if (!f.empty()) { cfg.capePath = f; SaveConfig(); } }
+    if (FancyBtn(T("Выбрать плащ (PNG)...", "Choose cape (PNG)..."), ImVec2(bw, bhh), gSoft)) { std::string f = PickImage(gHwnd); if (!f.empty()) { cfg.capePath = f; SaveConfig(); } }
     if (FancyBtn(T("Сбросить скин и плащ", "Reset skin and cape"), ImVec2(bw, bhh), gSoft, !cfg.skinPath.empty() || !cfg.capePath.empty())) { cfg.skinPath.clear(); cfg.capePath.clear(); SaveConfig(); }
     TD(T("Модель рук", "Arm model"));
     { int m = cfg.skinSlim ? 1 : 0, m0 = m; ImGui::BeginDisabled(cfg.skinPath.empty());
@@ -2527,7 +2483,7 @@ static void ModsBody() {
 static void ScrLog() {
     float em = ImGui::GetFontSize();
     if (Header(T("Лог", "Log"))) { Go(S_MAIN); return; }
-    if (FancyBtn(T("Открыть latest.log", "Open latest.log"), ImVec2(em * 14, em * 1.9f), gSoft)) OpenExternal(PS(gCfgDir / "logs" / "latest.log"));
+    if (FancyBtn(T("Открыть latest.log", "Open latest.log"), ImVec2(em * 14, em * 1.9f), gSoft)) ShellExecuteW(0, L"open", (gCfgDir / "logs" / "latest.log").wstring().c_str(), 0, 0, SW_SHOWNORMAL);
     ImGui::SameLine(); if (FancyBtn(T("Очистить окно", "Clear view"), ImVec2(em * 11, em * 1.9f), gSoft)) { std::lock_guard<std::mutex> l(gMu); gLog.clear(); }
     ImGui::BeginChild("log", ImVec2(0, 0), false);
     { std::lock_guard<std::mutex> l(gMu);
@@ -2550,7 +2506,7 @@ static std::vector<std::string> gComps; static float gCompsT = 99.f;
 
 static bool ZipDir(const fs::path& dir, const std::string& top, const fs::path& zipPath) { // папка -> zip (внутри лежит папка top)
     std::error_code ec; fs::create_directories(zipPath.parent_path(), ec);
-    FILE* f = fopen(zipPath.string().c_str(), "wb"); if (!f) return false;
+    FILE* f = _wfopen(zipPath.wstring().c_str(), L"wb"); if (!f) return false;
     mz_zip_archive z{};
     if (!mz_zip_writer_init_cfile(&z, f, 0)) { fclose(f); return false; }
     bool ok = true;
@@ -2558,7 +2514,7 @@ static bool ZipDir(const fs::path& dir, const std::string& top, const fs::path& 
         if (ec) break;
         if (!it->is_regular_file(ec)) continue;
         fs::path rel = fs::relative(it->path(), dir, ec); if (ec) continue;
-        if (rel.filename() == "session.lock") continue; // файл блокировки открытого мира
+        if (rel.filename() == L"session.lock") continue; // файл блокировки открытого мира
         std::string name = top + "/" + PS(rel); for (auto& ch : name) if (ch == '\\') ch = '/';
         std::string data = ReadAll(it->path());
         if (!mz_zip_writer_add_mem(&z, name.c_str(), data.data(), data.size(), MZ_DEFAULT_LEVEL)) { ok = false; break; }
@@ -2569,10 +2525,10 @@ static bool ZipDir(const fs::path& dir, const std::string& top, const fs::path& 
     return ok;
 }
 static std::string FmtWriteDate(const fs::path& p) {
-    struct stat sb; if (stat(p.c_str(), &sb) != 0) return "?";
-    time_t tt = sb.st_mtime; struct tm tmv; if (!localtime_r(&tt, &tmv)) return "?";
-    char b2[48]; snprintf(b2, sizeof(b2), "%02d.%02d.%04d %02d:%02d", tmv.tm_mday, tmv.tm_mon + 1, tmv.tm_year + 1900, tmv.tm_hour, tmv.tm_min);
-    return b2;
+    WIN32_FILE_ATTRIBUTE_DATA a{}; if (!GetFileAttributesExW(p.wstring().c_str(), GetFileExInfoStandard, &a)) return "?";
+    FILETIME lf; SYSTEMTIME st; if (!FileTimeToLocalFileTime(&a.ftLastWriteTime, &lf) || !FileTimeToSystemTime(&lf, &st)) return "?";
+    char t[48]; snprintf(t, sizeof(t), "%02d.%02d.%04d %02d:%02d", (int)st.wDay, (int)st.wMonth, (int)st.wYear, (int)st.wHour, (int)st.wMinute);
+    return t;
 }
 static void WorldSizeThread(std::string key, fs::path dir) {
     std::error_code ec; long long sum = 0;
@@ -2586,14 +2542,15 @@ static void ScanWorlds(bool force) {
     gWorldsT += ImGui::GetIO().DeltaTime; if (!force && gWorldsT < 1.5f) return; gWorldsT = 0;
     std::vector<WorldInfo> v; std::error_code ec;
     for (auto& e : fs::directory_iterator(gRoot / "instances" / P(gEdName) / "saves", ec))
-        if (e.is_directory(ec)) { WorldInfo w; w.name = U8(e.path().filename().string()); w.date = FmtWriteDate(e.path()); v.push_back(w); }
+        if (e.is_directory(ec)) { WorldInfo w; w.name = U8(e.path().filename().wstring()); w.date = FmtWriteDate(e.path()); v.push_back(w); }
     std::sort(v.begin(), v.end(), [](const WorldInfo& a, const WorldInfo& b) { return a.name < b.name; });
     gWorlds = v;
 }
-static std::string PickSaveZip(void*, const std::string& defName) { // нужен zenity или kdialog
-    if (HaveCmd("zenity")) return RunCapture("zenity --file-selection --save --confirm-overwrite --filename=" + ShQ(HomeDir() + "/" + defName) + " 2>/dev/null");
-    if (HaveCmd("kdialog")) return RunCapture("kdialog --getsavefilename " + ShQ(HomeDir() + "/" + defName) + " " + ShQ("*.zip|ZIP") + " 2>/dev/null");
-    Status(T("Для выбора файла нужен zenity или kdialog (установи через менеджер пакетов)", "zenity or kdialog is needed to choose a file (install it with your package manager)")); return "";
+static std::string PickSaveZip(HWND hw, const std::string& defName) {
+    wchar_t f[MAX_PATH] = {0}; lstrcpynW(f, W(defName).c_str(), MAX_PATH);
+    OPENFILENAMEW o{}; o.lStructSize = sizeof(o); o.hwndOwner = hw; o.lpstrFilter = L"ZIP\0*.zip\0"; o.lpstrFile = f; o.nMaxFile = MAX_PATH; o.lpstrDefExt = L"zip";
+    o.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    return GetSaveFileNameW(&o) ? U8(f) : "";
 }
 static void WorldTask(int kind, std::string inst, std::string world, std::string outPath) { // 0 бэкап, 1 экспорт, 2 удаление
     gWorldBusy = true; std::error_code ec;
@@ -2604,8 +2561,8 @@ static void WorldTask(int kind, std::string inst, std::string world, std::string
     } else {
         fs::path z; std::string what;
         if (kind == 0) {
-            time_t now = time(nullptr); struct tm st; localtime_r(&now, &st); char ts[64];
-            snprintf(ts, sizeof(ts), "%04d-%02d-%02d_%02d-%02d-%02d", st.tm_year + 1900, st.tm_mon + 1, st.tm_mday, st.tm_hour, st.tm_min, st.tm_sec);
+            SYSTEMTIME st; GetLocalTime(&st); char ts[64];
+            snprintf(ts, sizeof(ts), "%04d-%02d-%02d_%02d-%02d-%02d", (int)st.wYear, (int)st.wMonth, (int)st.wDay, (int)st.wHour, (int)st.wMinute, (int)st.wSecond);
             z = gRoot / "instances" / P(inst) / "poltergeist_backups" / P(world + "_" + ts + ".zip"); what = T("Резервная копия", "Backup");
         } else { z = P(outPath); what = T("Экспорт мира", "World export"); }
         Status(what + ": " + world + "...");
@@ -2657,7 +2614,7 @@ static void InstEditorBody(bool& close) {
             ImGui::SetCursorScreenPos(ImVec2(x - gp * 2 - bw * 2, by));
             if (FancyBtn(T("Бэкап", "Backup"), ImVec2(bw, bh), gSoft, !busyW)) std::thread(WorldTask, 0, gEdName, w.name, std::string()).detach();
             ImGui::SetCursorScreenPos(ImVec2(x - gp - bw, by));
-            if (FancyBtn(T("Экспорт", "Export"), ImVec2(bw, bh), gSoft, !busyW)) { std::string out = PickSaveZip(nullptr, w.name + ".zip"); if (!out.empty()) std::thread(WorldTask, 1, gEdName, w.name, out).detach(); }
+            if (FancyBtn(T("Экспорт", "Export"), ImVec2(bw, bh), gSoft, !busyW)) { std::string out = PickSaveZip(gHwnd, w.name + ".zip"); if (!out.empty()) std::thread(WorldTask, 1, gEdName, w.name, out).detach(); }
             ImGui::SetCursorScreenPos(ImVec2(x, p.y + (rh - tw) / 2));
             if (TrashBtn("del", tw, !busyW && !gGameRunning)) gWorldAsk = w.name;
             ImGui::SetCursorScreenPos(p); ImGui::Dummy(ImVec2(aw, rh));
@@ -2694,7 +2651,7 @@ static void InstEditorBody(bool& close) {
         }
         TD(T("Удалённый компонент скачается заново при следующем запуске.", "A removed component is downloaded again on the next launch."));
     } else if (gEdTab == 2) { // ---- Память ----
-        long pages = sysconf(_SC_PHYS_PAGES), psz = sysconf(_SC_PAGE_SIZE); int maxMb = std::max(2048, (int)((long long)pages * psz / (1024 * 1024) * 3 / 4));
+        MEMORYSTATUSEX ms{sizeof(ms)}; GlobalMemoryStatusEx(&ms); int maxMb = std::max(2048, (int)(ms.ullTotalPhys / (1024 * 1024) * 3 / 4));
         ch |= ImGui::Checkbox(T("Свои настройки памяти для этого экземпляра", "Override memory for this instance"), &gEd.memOv);
         if (!gEd.memOv) ImGui::TextDisabled(T("Сейчас используется общая настройка: %d МБ (вкладка Java в настройках)", "Global setting in use: %d MB (Java tab in settings)"), cfg.ramMB);
         ImGui::BeginDisabled(!gEd.memOv);
@@ -2714,7 +2671,7 @@ static void InstEditorBody(bool& close) {
             ImGui::EndCombo();
         }
         ImGui::SetNextItemWidth(-1);
-        if (ImGui::InputTextWithHint("##ejp", T("...или свой путь к java", "...or your own path to java"), eJava, sizeof(eJava))) { gEd.javaPath = eJava; ch = true; }
+        if (ImGui::InputTextWithHint("##ejp", T("...или свой путь к java.exe", "...or your own path to java.exe"), eJava, sizeof(eJava))) { gEd.javaPath = eJava; ch = true; }
         TD(T("Аргументы JVM", "JVM arguments")); ImGui::SetNextItemWidth(-1);
         if (ImGui::InputTextWithHint("##ejvm", "-XX:+UseZGC -Dfile.encoding=UTF-8", eJvm, sizeof(eJvm))) { gEd.jvmArgs = eJvm; ch = true; }
         ch |= ImGui::Checkbox(T("Пропустить проверку совместимости Java", "Skip Java compatibility check"), &gEd.skipCompat);
@@ -2731,7 +2688,7 @@ static void InstEditorBody(bool& close) {
     } else if (gEdTab == 5) { // ---- Команды ----
         ch |= ImGui::Checkbox(T("Свои команды для этого экземпляра", "Custom commands for this instance"), &gEd.cmdOv);
         ImGui::BeginDisabled(!gEd.cmdOv);
-        TD(T("Команда-обёртка (Wrapper), например gamemoderun или mangohud — ставится перед командой запуска Java", "Wrapper command — placed before the Java launch command")); ImGui::SetNextItemWidth(-1);
+        TD(T("Команда-обёртка (Wrapper) — ставится перед командой запуска Java", "Wrapper command — placed before the Java launch command")); ImGui::SetNextItemWidth(-1);
         if (ImGui::InputText("##ewrap", eWrap, sizeof(eWrap))) { gEd.wrapper = eWrap; ch = true; }
         TD(T("Команда перед запуском (игра ждёт её завершения)", "Pre-launch command (the game waits for it)")); ImGui::SetNextItemWidth(-1);
         if (ImGui::InputText("##epre", ePre, sizeof(ePre))) { gEd.pre = ePre; ch = true; }
@@ -2739,8 +2696,8 @@ static void InstEditorBody(bool& close) {
         if (ImGui::InputText("##epost", ePost, sizeof(ePost))) { gEd.post = ePost; ch = true; }
         ImGui::EndDisabled();
         ImGui::PushTextWrapPos(0.f);
-        TD(T("Переменные: $INST_DIR и $INST_MC_DIR (папка экземпляра), $INST_NAME, $INST_ID, $INST_MC_VER, $INST_LOADER, $INST_JAVA., они же доступны как переменные окружения. Команды выполняются через sh -c; пути с пробелами бери в кавычки.",
-              "Variables: $INST_DIR and $INST_MC_DIR (instance folder), $INST_NAME, $INST_ID, $INST_MC_VER, $INST_LOADER, $INST_JAVA., also available as environment variables. Commands run via sh -c; quote paths with spaces."));
+        TD(T("Переменные: $INST_DIR и $INST_MC_DIR (папка экземпляра), $INST_NAME, $INST_ID, $INST_MC_VER, $INST_LOADER, $INST_JAVA. Они же доступны как переменные окружения (%INST_DIR%). Команды выполняются через cmd.exe; пути с пробелами бери в кавычки.",
+              "Variables: $INST_DIR and $INST_MC_DIR (instance folder), $INST_NAME, $INST_ID, $INST_MC_VER, $INST_LOADER, $INST_JAVA. Also available as environment variables (%INST_DIR%). Commands run via cmd.exe; quote paths with spaces."));
         ImGui::PopTextWrapPos();
     } else { // ---- Переменные окружения ----
         ch |= ImGui::Checkbox(T("Свои переменные окружения для этого экземпляра", "Custom environment variables for this instance"), &gEd.envOv);
@@ -3011,22 +2968,22 @@ static void ScrSettings() {
     if (gSetTab == 0) { // ---- Общие ----
         TD(T("Папка игры", "Game folder"));
         { std::string gd = PS(gRoot); ImGui::TextWrapped("%s", gd.c_str()); }
-        if (FancyBtn(T("Выбрать папку игры...", "Choose game folder..."), ImVec2(em * 14, em * 1.9f), gSoft, !gBusy)) { std::string f = PickFolder(nullptr); if (!f.empty()) { SetGameDir(f); ScanShots(); } }
+        if (FancyBtn(T("Выбрать папку игры...", "Choose game folder..."), ImVec2(em * 14, em * 1.9f), gSoft, !gBusy)) { std::string f = PickFolder(gHwnd); if (!f.empty()) { SetGameDir(f); ScanShots(); } }
         if (!cfg.gameDir.empty()) { ImGui::SameLine(); if (FancyBtn(T("Вернуть стандартную", "Reset to default"), ImVec2(em * 12, em * 1.9f), gSoft, !gBusy)) { SetGameDir(""); ScanShots(); } }
         ImGui::Checkbox(T("Моды", "Mods"), &cfg.modsOn);
         if (ImGui::Checkbox(T("Логи", "Logs"), &cfg.logsOn)) gLogOn = cfg.logsOn;
         TD(T("Видеокарта", "Graphics card"));
-        { const char* it[] = {T("Авто (решает система)", "Auto (system decides)"), T("Использовать дискретную", "Use discrete GPU"), T("Использовать встроенную", "Use integrated GPU")};
+        { const char* it[] = {T("Авто (решает Windows)", "Auto (Windows decides)"), T("Использовать дискретную", "Use discrete GPU"), T("Использовать встроенную", "Use integrated GPU")};
           int g = cfg.gpu == 2 ? 1 : cfg.gpu == 1 ? 2 : 0; if (ComboI("##gpu", g, it, 3)) cfg.gpu = g == 1 ? 2 : g == 2 ? 1 : 0; } // 0 авто, 1 встроенная, 2 дискретная
         if (FancyBtn(T("Проверка подключения к Modrinth", "Check Modrinth connection"), ImVec2(em * 19, em * 1.9f), gSoft, !gModChkBusy)) std::thread(ModrinthCheckThread).detach();
         { std::string chk; { std::lock_guard<std::mutex> l(gModMu); chk = gModChk; } if (!chk.empty()) ImGui::TextColored(gAccent, "%s", chk.c_str()); }
         if (FancyBtn(T("Посмотреть лог", "View log"), ImVec2(em * 12, em * 1.9f), gSoft)) Go(S_LOG);
-        ImGui::SameLine(); if (FancyBtn(T("Открыть latest.log", "Open latest.log"), ImVec2(em * 14, em * 1.9f), gSoft)) OpenExternal(PS(gCfgDir / "logs" / "latest.log"));
+        ImGui::SameLine(); if (FancyBtn(T("Открыть latest.log", "Open latest.log"), ImVec2(em * 14, em * 1.9f), gSoft)) ShellExecuteW(0, L"open", (gCfgDir / "logs" / "latest.log").wstring().c_str(), 0, 0, SW_SHOWNORMAL);
         TD(T("Язык лаунчера", "Launcher language"));
         { const char* it[] = {"Русский", "English"}; ComboI("##lang", cfg.lang, it, 2); }
         TD(T("После запуска игры", "After the game starts"));
         ImGui::RadioButton(T("Оставить лаунчер как есть", "Leave the launcher as is"), &cfg.onLaunch, 0);
-        ImGui::RadioButton(T("Свернуть лаунчер в фон (значок в трее; если трея нет — просто свернуть)", "Hide the launcher to background (tray icon; minimize if there is no tray)"), &cfg.onLaunch, 1);
+        ImGui::RadioButton(T("Свернуть лаунчер в фон (значок у часов)", "Hide the launcher to background (tray icon)"), &cfg.onLaunch, 1);
         ImGui::RadioButton(T("Закрыть лаунчер", "Close the launcher"), &cfg.onLaunch, 2);
         TD(T("Показывать в списке версий", "Show in the version list"));
         ImGui::Checkbox(T("Снапшоты", "Snapshots"), &cfg.snapshots);
@@ -3041,7 +2998,7 @@ static void ScrSettings() {
         ImGui::Checkbox(T("Закругление углов", "Rounded corners"), &cfg.rounded);
         if (Th().glass) {
             TD(T("Фон", "Background"));
-            if (FancyBtn(T("Загрузить", "Upload"), ImVec2(em * 11, em * 1.9f), gSoft)) { std::string f = PickImage(nullptr); if (!f.empty()) { cfg.bg = f; cfg.slideshow = false; LoadBgAsync(f); } }
+            if (FancyBtn(T("Загрузить", "Upload"), ImVec2(em * 11, em * 1.9f), gSoft)) { std::string f = PickImage(gHwnd); if (!f.empty()) { cfg.bg = f; cfg.slideshow = false; LoadBgAsync(f); } }
             ImGui::SameLine(); if (FancyBtn(T("Скрины из майна", "Minecraft screenshots"), ImVec2(em * 14, em * 1.9f), gSoft)) { ScanShots(); cfg.slideshow = true; NextShot(); }
             ImGui::Checkbox(T("Слайд-шоу (каждые ~18 сек)", "Slideshow (every ~18 s)"), &cfg.slideshow);
             ImGui::TextDisabled(T("Найдено скриншотов: %d", "Screenshots found: %d"), (int)gShots.size());
@@ -3077,20 +3034,13 @@ static void ScrSettings() {
             ImGui::EndCombo();
         }
         ImGui::SetNextItemWidth(-1);
-        if (ImGui::InputTextWithHint("##jp", T("...или свой путь к java", "...or your own path to java"), bJava, sizeof(bJava))) cfg.javaPath = bJava;
+        if (ImGui::InputTextWithHint("##jp", T("...или свой путь к java.exe", "...or your own path to java.exe"), bJava, sizeof(bJava))) cfg.javaPath = bJava;
         TD(T("Аргументы Java", "Java arguments"));
         ImGui::SetNextItemWidth(-1);
         if (ImGui::InputTextWithHint("##jvm", "-XX:+UseZGC -Dfile.encoding=UTF-8", bJvm, sizeof(bJvm))) cfg.jvmArgs = bJvm;
         TD(T("Добавляются после стандартных (-Xmx, G1GC)", "Appended after the defaults (-Xmx, G1GC)"));
         TD(T("Память (ОЗУ)", "Memory (RAM)"));
-#ifdef _WIN32
-    MEMORYSTATUSEX ms{sizeof(ms)}; GlobalMemoryStatusEx(&ms); int maxMb = std::max(2048, (int)(ms.ullTotalPhys / (1024 * 1024) * 3 / 4));
-#else
-    long pages = sysconf(_SC_PHYS_PAGES);
-    long page_size = sysconf(_SC_PAGE_SIZE);
-    long total_memory = pages * page_size;
-    int maxMb = std::max(2048, (int)(total_memory / (1024 * 1024) * 3 / 4));
-#endif
+        MEMORYSTATUSEX ms{sizeof(ms)}; GlobalMemoryStatusEx(&ms); int maxMb = std::max(2048, (int)(ms.ullTotalPhys / (1024 * 1024) * 3 / 4));
         ImGui::SetNextItemWidth(-1); ImGui::SliderInt("##ram", &cfg.ramMB, 1024, maxMb, T("%d МБ", "%d MB")); cfg.ramMB = std::min(cfg.ramMB, maxMb);
 
     } else { // ---- О приложении ----
@@ -3126,7 +3076,7 @@ static void DrawToast(float W) { // плашка-приветствие свер
     if (gToastT < 0.f) return;
     gToastT += dt; const float tIn = 0.5f, hold = 4.2f, tOut = 0.45f, total = tIn + hold + tOut;
     if (gToastT > total) { gToastT = -1.f; return; }
-    time_t tt = time(nullptr); struct tm lt{}; localtime_r(&tt, &lt); int hr = lt.tm_hour; const char* g;
+    SYSTEMTIME st; GetLocalTime(&st); int hr = st.wHour; const char* g;
     if (cfg.lang == 1) g = hr >= 5 && hr < 11 ? "Good morning" : hr < 17 && hr >= 11 ? "Good afternoon" : hr >= 17 && hr < 23 ? "Good evening" : "Good night";
     else g = hr >= 5 && hr < 11 ? "Доброе утро" : hr < 17 && hr >= 11 ? "Добрый день" : hr >= 17 && hr < 23 ? "Добрый вечер" : "Доброй ночи";
     std::string line = std::string(g) + ", " + nick;
@@ -3184,7 +3134,39 @@ static void DrawUI(float W, float H) {
     ImGui::PopStyleVar(2);
     float em = ImGui::GetFontSize(), intro = AnimK("intro", 1.f, 2.5f);
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    float tbH = em * 0.9f; gCapH = tbH; // верхняя полоса: за неё окно можно таскать
+    float tbH = em * 2.3f; gCapH = tbH; // верхняя полоса: за неё окно можно таскать
+    { // кнопки окна: свернуть / развернуть (или в окно) / закрыть
+        bool maxed = IsZoomed(gHwnd) != 0;
+        float bw = em * 2.6f, bh = em * 1.7f, gp = em * .3f, total = bw * 3 + gp * 2, x0 = W - em * 1.2f - total, y0 = (tbH - bh) / 2 + em * .2f;
+        gBtnX0 = x0 - em * .5f;
+        for (int i = 0; i < 3; i++) {
+            ImVec2 a(x0 + i * (bw + gp), y0), b(a.x + bw, a.y + bh); bool close = i == 2;
+            ImGui::SetCursorScreenPos(a); ImGui::PushID(100 + i);
+            bool clk = ImGui::InvisibleButton("##wb", ImVec2(bw, bh));
+            float t = AnimK("h", ImGui::IsItemHovered() ? 1.f : 0.f, 14.f);
+            ImVec4 base = lt ? ImVec4(0, 0, 0, .08f) : ImVec4(1, 1, 1, .10f);
+            ImVec4 hov = close ? ImVec4(.91f, .28f, .28f, .95f) : (lt ? ImVec4(0, 0, 0, .18f) : ImVec4(1, 1, 1, .22f));
+            ImVec4 c(base.x + (hov.x - base.x) * t, base.y + (hov.y - base.y) * t, base.z + (hov.z - base.z) * t, base.w + (hov.w - base.w) * t);
+            dl->AddRectFilled(a, b, ImGui::GetColorU32(c), R(bh * .32f));
+            ImU32 icol = (close && t > .5f) ? IM_COL32(255, 255, 255, 255) : TextCol();
+            float s2 = em * .36f, th = std::max(1.5f, 1.6f * gS), mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+            if (i == 0) dl->AddLine(ImVec2(mx - s2, my + s2 * .4f), ImVec2(mx + s2, my + s2 * .4f), icol, th);
+            else if (i == 1) {
+                if (!maxed) dl->AddRect(ImVec2(mx - s2, my - s2), ImVec2(mx + s2, my + s2), icol, R(2.f), 0, th);
+                else {
+                    ImVec2 pts[5] = {ImVec2(mx - s2 * .4f, my - s2 * .4f), ImVec2(mx - s2 * .4f, my - s2), ImVec2(mx + s2, my - s2), ImVec2(mx + s2, my + s2 * .4f), ImVec2(mx + s2 * .4f, my + s2 * .4f)};
+                    dl->AddPolyline(pts, 5, icol, 0, th);
+                    dl->AddRect(ImVec2(mx - s2, my - s2 * .4f), ImVec2(mx + s2 * .4f, my + s2), icol, R(2.f), 0, th);
+                }
+            } else {
+                dl->AddLine(ImVec2(mx - s2 * .85f, my - s2 * .85f), ImVec2(mx + s2 * .85f, my + s2 * .85f), icol, th);
+                dl->AddLine(ImVec2(mx - s2 * .85f, my + s2 * .85f), ImVec2(mx + s2 * .85f, my - s2 * .85f), icol, th);
+            }
+            ImGui::PopID();
+            if (clk) PostMessageW(gHwnd, close ? WM_CLOSE : WM_SYSCOMMAND, i == 0 ? SC_MINIMIZE : (i == 1 ? (maxed ? SC_RESTORE : SC_MAXIMIZE) : 0), 0); // через очередь, не посреди кадра
+        }
+    }
+
     float pw = W - em * 2.4f, px = em * 1.2f - (1 - intro) * em * 3, py = tbH, ph = H - tbH - em * 1.2f;
     { ImVec4 pc = th.panel; pc.w *= intro; ImVec4 bc = th.border; bc.w *= intro;
       dl->AddRectFilled(ImVec2(px, py), ImVec2(px + pw, py + ph), U(pc), R(em * .9f)); dl->AddRect(ImVec2(px, py), ImVec2(px + pw, py + ph), U(bc), R(em * .9f)); }
@@ -3242,156 +3224,64 @@ static void DrawUI(float W, float H) {
     ImGui::End();
     DrawToast(W);
 }
-
-// ============================ Трей (StatusNotifierItem по D-Bus; libdbus подгружается на лету, линковать ничего не нужно) ============================
-// Работает в KDE Plasma, XFCE, Cinnamon, MATE, LXQt, Budgie и в GNOME с расширением «AppIndicator and KStatusNotifierItem Support».
-// Если трея нет (чистый GNOME без расширения) — лаунчер просто сворачивается, чтобы не потерять окно.
-struct DBusConnection; struct DBusMessage;
-struct DbErr { const char* name; const char* message; unsigned int bits; void* pad; };
-struct alignas(8) DbIter { char b[128]; };
-struct DbVTable { void (*unreg)(DBusConnection*, void*); int (*msg)(DBusConnection*, DBusMessage*, void*); void* pad[4]; };
-static DBusConnection* gDbus = nullptr; static bool gDbusTried = false, gTrayOn = false; static std::string gTrayName;
-static DBusConnection* (*p_bus_get)(int, DbErr*);
-static void (*p_err_init)(DbErr*); static int (*p_err_is_set)(const DbErr*); static void (*p_err_free)(DbErr*);
-static void (*p_exit_on_disc)(DBusConnection*, int);
-static int (*p_req_name)(DBusConnection*, const char*, unsigned int, DbErr*);
-static int (*p_rel_name)(DBusConnection*, const char*, DbErr*);
-static int (*p_has_owner)(DBusConnection*, const char*, DbErr*);
-static DBusMessage* (*p_new_call)(const char*, const char*, const char*, const char*);
-static int (*p_append_args)(DBusMessage*, int, ...);
-static DBusMessage* (*p_send_block)(DBusConnection*, DBusMessage*, int, DbErr*);
-static void (*p_msg_unref)(DBusMessage*);
-static int (*p_register_path)(DBusConnection*, const char*, const DbVTable*, void*);
-static int (*p_rw_dispatch)(DBusConnection*, int);
-static DBusMessage* (*p_new_return)(DBusMessage*);
-static int (*p_send)(DBusConnection*, DBusMessage*, unsigned int*);
-static void (*p_iter_init_append)(DBusMessage*, DbIter*);
-static int (*p_iter_append_basic)(DbIter*, int, const void*);
-static int (*p_iter_open)(DbIter*, int, const char*, DbIter*);
-static int (*p_iter_close)(DbIter*, DbIter*);
-static int (*p_iter_fixed_array)(DbIter*, int, const void*, int);
-static int (*p_iter_init)(DBusMessage*, DbIter*);
-static void (*p_iter_get_basic)(DbIter*, void*);
-static int (*p_iter_next)(DbIter*);
-static const char* (*p_get_member)(DBusMessage*);
-static const char* (*p_get_iface)(DBusMessage*);
-static const int kTrayPx = 24;
-static std::vector<unsigned char> gTrayIcon; // ARGB32, как требует StatusNotifierItem
-static void TrayBuildIcon() {
-    gTrayIcon.assign((size_t)kTrayPx * kTrayPx * 4, 0);
-    unsigned char r = (unsigned char)(gAccent.x * 255), g = (unsigned char)(gAccent.y * 255), b = (unsigned char)(gAccent.z * 255);
-    for (int y = 0; y < kTrayPx; y++) for (int x = 0; x < kTrayPx; x++) {
-        float dx = x + .5f - kTrayPx / 2.f, dy = y + .5f - kTrayPx / 2.f, d = sqrtf(dx * dx + dy * dy);
-        float a = std::clamp(kTrayPx / 2.f - 0.5f - d, 0.f, 1.f), w = std::clamp(5.5f - sqrtf(dx * dx + (dy + 1.f) * (dy + 1.f)), 0.f, 1.f); // диск цвета лаунчера + белое «привидение-точка»
-        unsigned char* q = &gTrayIcon[((size_t)y * kTrayPx + x) * 4];
-        q[0] = (unsigned char)(a * 255); q[1] = (unsigned char)(r + (255 - r) * w); q[2] = (unsigned char)(g + (255 - g) * w); q[3] = (unsigned char)(b + (255 - b) * w);
-    }
+// ============================ Win32 / D3D11 ============================
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
+static void CreateRTV() { ID3D11Texture2D* b = nullptr; gSwap->GetBuffer(0, IID_PPV_ARGS(&b)); gDev->CreateRenderTargetView(b, nullptr, &gRTV); b->Release(); }
+// ---------- Трей: «свернуть лаунчер в фон» ----------
+static NOTIFYICONDATAW gNid; static bool gTray = false;
+static void TrayAdd() {
+    if (gTray) return;
+    ZeroMemory(&gNid, sizeof(gNid)); gNid.cbSize = sizeof(gNid); gNid.hWnd = gHwnd; gNid.uID = 1;
+    gNid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP; gNid.uCallbackMessage = WM_TRAY;
+    gNid.hIcon = LoadIconW(nullptr, IDI_APPLICATION); lstrcpynW(gNid.szTip, L"PTLauncher", 64);
+    gTray = Shell_NotifyIconW(NIM_ADD, &gNid) != FALSE;
 }
-static void TrayVarStr(DbIter* par, const char* v) { DbIter var; p_iter_open(par, 'v', "s", &var); p_iter_append_basic(&var, 's', &v); p_iter_close(par, &var); }
-static bool TrayProp(DbIter* par, const std::string& n) { // значение свойства org.kde.StatusNotifierItem внутри variant
-    if (n == "Category") TrayVarStr(par, "ApplicationStatus");
-    else if (n == "Id" || n == "Title") TrayVarStr(par, "PTLauncher");
-    else if (n == "Status") TrayVarStr(par, "Active");
-    else if (n == "IconName" || n == "OverlayIconName" || n == "AttentionIconName" || n == "IconThemePath") TrayVarStr(par, "");
-    else if (n == "WindowId") { DbIter var; int z = 0; p_iter_open(par, 'v', "i", &var); p_iter_append_basic(&var, 'i', &z); p_iter_close(par, &var); }
-    else if (n == "ItemIsMenu") { DbIter var; unsigned int f = 0; p_iter_open(par, 'v', "b", &var); p_iter_append_basic(&var, 'b', &f); p_iter_close(par, &var); }
-    else if (n == "IconPixmap") {
-        DbIter var, arr, st, ba; int w = kTrayPx, h = kTrayPx; const unsigned char* px = gTrayIcon.data();
-        p_iter_open(par, 'v', "a(iiay)", &var); p_iter_open(&var, 'a', "(iiay)", &arr); p_iter_open(&arr, 'r', nullptr, &st);
-        p_iter_append_basic(&st, 'i', &w); p_iter_append_basic(&st, 'i', &h);
-        p_iter_open(&st, 'a', "y", &ba); p_iter_fixed_array(&ba, 'y', &px, (int)gTrayIcon.size()); p_iter_close(&st, &ba);
-        p_iter_close(&arr, &st); p_iter_close(&var, &arr); p_iter_close(par, &var);
-    } else return false;
-    return true;
-}
-static int TrayHandler(DBusConnection* c, DBusMessage* m, void*) { // 0 = обработано, 1 = не наше
-    const char* ci = p_get_iface(m); const char* cm = p_get_member(m); if (!ci || !cm) return 1;
-    std::string I = ci, M = cm;
-    static const char* kProps[] = {"Category", "Id", "Title", "Status", "WindowId", "IconName", "IconPixmap", "OverlayIconName", "AttentionIconName", "ItemIsMenu"};
-    if (I == "org.kde.StatusNotifierItem") {
-        if (M == "Activate" || M == "SecondaryActivate" || M == "ContextMenu") gWinCmd = 2; // клик по значку — вернуть окно
-        DBusMessage* r = p_new_return(m); if (r) { p_send(c, r, nullptr); p_msg_unref(r); }
-        return 0;
-    }
-    if (I == "org.freedesktop.DBus.Properties") {
-        DBusMessage* r = p_new_return(m); if (!r) return 0;
-        DbIter out; p_iter_init_append(r, &out);
-        if (M == "GetAll") {
-            DbIter dict, ent; p_iter_open(&out, 'a', "{sv}", &dict);
-            for (const char* k : kProps) { p_iter_open(&dict, 'e', nullptr, &ent); p_iter_append_basic(&ent, 's', &k); TrayProp(&ent, k); p_iter_close(&dict, &ent); }
-            p_iter_close(&out, &dict);
-        } else if (M == "Get") {
-            DbIter in; const char* a = nullptr; const char* b = nullptr;
-            if (p_iter_init(m, &in)) { p_iter_get_basic(&in, &a); if (p_iter_next(&in)) p_iter_get_basic(&in, &b); }
-            if (!b || !TrayProp(&out, b)) TrayVarStr(&out, "");
+static void TrayDel() { if (!gTray) return; Shell_NotifyIconW(NIM_DELETE, &gNid); gTray = false; }
+static void HideToTray() { TrayAdd(); if (gTray) ShowWindow(gHwnd, SW_HIDE); else ShowWindow(gHwnd, SW_MINIMIZE); } // без значка в трее не прячем - иначе окно не вернуть
+static void ShowFromTray() { TrayDel(); if (!IsWindowVisible(gHwnd)) ShowWindow(gHwnd, SW_SHOW); if (IsIconic(gHwnd)) ShowWindow(gHwnd, SW_RESTORE); SetForegroundWindow(gHwnd); }
+static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    if (ImGui_ImplWin32_WndProcHandler(h, m, w, l)) return true;
+    switch (m) {
+    case WM_NCCALCSIZE: // системного заголовка и рамки нет: клиентская область = всё окно
+        if (w) {
+            if (IsZoomed(h)) { // развёрнутое окно выходит за экран на толщину рамки
+                NCCALCSIZE_PARAMS* np = (NCCALCSIZE_PARAMS*)l;
+                int fx = GetSystemMetrics(SM_CXFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER), fy = GetSystemMetrics(SM_CYFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER);
+                np->rgrc[0].left += fx; np->rgrc[0].top += fy; np->rgrc[0].right -= fx; np->rgrc[0].bottom -= fy;
+            }
+            return 0;
         }
-        p_send(c, r, nullptr); p_msg_unref(r);
-        return 0;
+        break;
+    case WM_NCHITTEST: { // края - изменение размера, верхняя полоса - перетаскивание, остальное - клиент (ImGui)
+        POINT pt{(short)LOWORD(l), (short)HIWORD(l)}; RECT rc; GetWindowRect(h, &rc);
+        if (!IsZoomed(h)) {
+            int b = (int)(6 * gS); bool L = pt.x < rc.left + b, Rt = pt.x >= rc.right - b, Tp = pt.y < rc.top + b, Bt = pt.y >= rc.bottom - b;
+            if (Tp && L) return HTTOPLEFT; if (Tp && Rt) return HTTOPRIGHT; if (Bt && L) return HTBOTTOMLEFT; if (Bt && Rt) return HTBOTTOMRIGHT;
+            if (L) return HTLEFT; if (Rt) return HTRIGHT; if (Tp) return HTTOP; if (Bt) return HTBOTTOM;
+        }
+        ScreenToClient(h, &pt);
+        if (pt.y >= 0 && pt.y < (LONG)gCapH && pt.x < (LONG)gBtnX0) return HTCAPTION;
+        return HTCLIENT;
     }
-    return 1;
-}
-static bool TrayInit() {
-    if (gDbus) return true; if (gDbusTried) return false; gDbusTried = true;
-    void* lib = dlopen("libdbus-1.so.3", RTLD_LAZY | RTLD_LOCAL); if (!lib) lib = dlopen("libdbus-1.so", RTLD_LAZY | RTLD_LOCAL); if (!lib) return false;
-    bool ok = true;
-    auto ld = [&](auto& fp, const char* n) { fp = reinterpret_cast<std::remove_reference_t<decltype(fp)>>(dlsym(lib, n)); if (!fp) ok = false; };
-    ld(p_bus_get, "dbus_bus_get"); ld(p_err_init, "dbus_error_init"); ld(p_err_is_set, "dbus_error_is_set"); ld(p_err_free, "dbus_error_free");
-    ld(p_exit_on_disc, "dbus_connection_set_exit_on_disconnect"); ld(p_req_name, "dbus_bus_request_name"); ld(p_rel_name, "dbus_bus_release_name"); ld(p_has_owner, "dbus_bus_name_has_owner");
-    ld(p_new_call, "dbus_message_new_method_call"); ld(p_append_args, "dbus_message_append_args"); ld(p_send_block, "dbus_connection_send_with_reply_and_block"); ld(p_msg_unref, "dbus_message_unref");
-    ld(p_register_path, "dbus_connection_register_object_path"); ld(p_rw_dispatch, "dbus_connection_read_write_dispatch"); ld(p_new_return, "dbus_message_new_method_return"); ld(p_send, "dbus_connection_send");
-    ld(p_iter_init_append, "dbus_message_iter_init_append"); ld(p_iter_append_basic, "dbus_message_iter_append_basic"); ld(p_iter_open, "dbus_message_iter_open_container"); ld(p_iter_close, "dbus_message_iter_close_container");
-    ld(p_iter_fixed_array, "dbus_message_iter_append_fixed_array"); ld(p_iter_init, "dbus_message_iter_init"); ld(p_iter_get_basic, "dbus_message_iter_get_basic"); ld(p_iter_next, "dbus_message_iter_next");
-    ld(p_get_member, "dbus_message_get_member"); ld(p_get_iface, "dbus_message_get_interface");
-    if (!ok) return false;
-    DbErr e; p_err_init(&e);
-    DBusConnection* c = p_bus_get(0, &e); // 0 = сессионная шина
-    if (p_err_is_set(&e)) { p_err_free(&e); return false; }
-    if (!c) return false;
-    p_exit_on_disc(c, 0);
-    static const DbVTable vt = {nullptr, TrayHandler, {nullptr, nullptr, nullptr, nullptr}};
-    if (!p_register_path(c, "/StatusNotifierItem", &vt, nullptr)) return false;
-    TrayBuildIcon(); gDbus = c; return true;
-}
-static bool TrayAdd() { // повесить значок в трей; false — трея нет
-    if (gTrayOn) return true;
-    if (!TrayInit()) return false;
-    DbErr e; p_err_init(&e);
-    int has = p_has_owner(gDbus, "org.kde.StatusNotifierWatcher", &e); if (p_err_is_set(&e)) p_err_free(&e);
-    if (!has) return false;
-    gTrayName = "org.kde.StatusNotifierItem-" + std::to_string((long)getpid()) + "-1";
-    p_req_name(gDbus, gTrayName.c_str(), 4 /* DO_NOT_QUEUE */, &e); if (p_err_is_set(&e)) { p_err_free(&e); return false; }
-    DBusMessage* m = p_new_call("org.kde.StatusNotifierWatcher", "/StatusNotifierWatcher", "org.kde.StatusNotifierWatcher", "RegisterStatusNotifierItem");
-    if (!m) return false;
-    const char* nm = gTrayName.c_str(); p_append_args(m, 's', &nm, 0);
-    DBusMessage* rep = p_send_block(gDbus, m, 2000, &e); p_msg_unref(m);
-    if (p_err_is_set(&e)) { p_err_free(&e); p_rel_name(gDbus, gTrayName.c_str(), &e); if (p_err_is_set(&e)) p_err_free(&e); return false; }
-    if (rep) p_msg_unref(rep);
-    gTrayOn = true; return true;
-}
-static void TrayDel() { // убрать значок: освобождаем имя на шине — хост трея сам удалит иконку
-    if (!gTrayOn) return; DbErr e; p_err_init(&e);
-    p_rel_name(gDbus, gTrayName.c_str(), &e); if (p_err_is_set(&e)) p_err_free(&e);
-    gTrayOn = false;
-}
-static void TrayPump() { if (gTrayOn && gDbus) p_rw_dispatch(gDbus, 0); }
-static void HideToTray() { if (TrayAdd()) glfwHideWindow(gWin); else glfwIconifyWindow(gWin); } // нет трея — не прячем, а сворачиваем
-
-// ============================ GLFW / OpenGL3 (Linux) ============================
-static void GlfwErr(int c, const char* d) { fprintf(stderr, "GLFW error %d: %s\n", c, d); }
-static std::string ExeDir() { std::error_code ec; fs::path p = fs::read_symlink("/proc/self/exe", ec); return ec ? std::string() : PS(p.parent_path()); }
-static std::string FindFont() { // кириллический TTF: рядом с программой, затем типичные места дистрибутивов, затем fontconfig
-    std::string dir = ExeDir(); std::error_code ec;
-    std::vector<std::string> cand;
-    if (!dir.empty()) cand.push_back(dir + "/font.ttf");
-    for (const char* f : {
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/TTF/DejaVuSans.ttf", "/usr/share/fonts/dejavu/DejaVuSans.ttf", "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf", "/usr/share/fonts/liberation/LiberationSans-Regular.ttf", "/usr/share/fonts/liberation-sans/LiberationSans-Regular.ttf", "/usr/share/fonts/TTF/LiberationSans-Regular.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf", "/usr/share/fonts/noto/NotoSans-Regular.ttf", "/usr/share/fonts/google-noto/NotoSans-Regular.ttf", "/usr/share/fonts/opentype/noto/NotoSans-Regular.ttf",
-        "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf", "/usr/share/fonts/TTF/Ubuntu-R.ttf", "/usr/share/fonts/adobe-source-sans/SourceSans3-Regular.otf"}) cand.push_back(f);
-    for (auto& f : cand) if (fs::exists(f, ec)) return f;
-    std::string fc = RunCapture("fc-match -f '%{file}' 'sans-serif:lang=ru' 2>/dev/null"); // .ttc здесь не подойдёт — берём только ttf/otf
-    if (!fc.empty() && (fc.size() > 4) && (fc.compare(fc.size() - 4, 4, ".ttf") == 0 || fc.compare(fc.size() - 4, 4, ".otf") == 0) && fs::exists(fc, ec)) return fc;
-    return "";
+    case WM_SIZE:
+        if (gDev && w != SIZE_MINIMIZED) { if (gRTV) { gRTV->Release(); gRTV = nullptr; } gSwap->ResizeBuffers(0, LOWORD(l), HIWORD(l), DXGI_FORMAT_UNKNOWN, 0); CreateRTV(); }
+        return 0;
+    case WM_GETMINMAXINFO: { MINMAXINFO* mm = (MINMAXINFO*)l; mm->ptMinTrackSize.x = (LONG)(900 * gS); mm->ptMinTrackSize.y = (LONG)(600 * gS); return 0; }
+    case WM_SYSCOMMAND: if ((w & 0xfff0) == SC_KEYMENU) return 0; break;
+    case WM_APP_HIDE: HideToTray(); return 0;
+    case WM_APP_SHOW: ShowFromTray(); return 0;
+    case WM_TRAY:
+        if (LOWORD(l) == WM_LBUTTONUP || LOWORD(l) == WM_LBUTTONDBLCLK) ShowFromTray();
+        else if (LOWORD(l) == WM_RBUTTONUP) {
+            POINT pt; GetCursorPos(&pt); HMENU mn = CreatePopupMenu();
+            AppendMenuW(mn, MF_STRING, 1, W(T("Показать лаунчер", "Show launcher")).c_str()); AppendMenuW(mn, MF_STRING, 2, W(T("Закрыть", "Quit")).c_str());
+            SetForegroundWindow(h); int cmd = (int)TrackPopupMenu(mn, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, h, nullptr); DestroyMenu(mn); PostMessageW(h, WM_NULL, 0, 0);
+            if (cmd == 1) ShowFromTray(); else if (cmd == 2) PostMessageW(h, WM_CLOSE, 0, 0);
+        }
+        return 0;
+    case WM_DESTROY: TrayDel(); PostQuitMessage(0); return 0;
+    }
+    return DefWindowProcW(h, m, w, l);
 }
 static void OpenSessionLog() { // полный лог сессии: logs/latest.log (прошлый запуск сохраняется как previous.log)
     std::error_code ec; fs::path d = gCfgDir / "logs"; fs::create_directories(d, ec);
@@ -3400,52 +3290,53 @@ static void OpenSessionLog() { // полный лог сессии: logs/latest.
     gLogFile.open(cur, std::ios::binary | std::ios::trunc);
     Log(std::string(kAppName) + " v" + kVer + " запущен. Папка лаунчера: " + PS(gCfgDir));
 }
-int main(int, char**) {
-    curl_global_init(CURL_GLOBAL_DEFAULT);
-    { // папка данных: ~/.ptlauncher; данные прошлой версии (~/.local/share/mclauncher) переносим один раз
-        std::string xdg = Env("XDG_DATA_HOME"); fs::path dh = xdg.empty() ? fs::path(HomeDir()) / ".local" / "share" : fs::path(xdg);
-        fs::path old = dh / "mclauncher"; gCfgDir = fs::path(HomeDir()) / ".ptlauncher"; std::error_code e0;
-        if (!fs::exists(gCfgDir, e0) && fs::exists(old, e0)) { fs::rename(old, gCfgDir, e0); if (e0) { fs::copy(old, gCfgDir, fs::copy_options::recursive | fs::copy_options::skip_existing, e0); } }
+int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int) {
+    ImGui_ImplWin32_EnableDpiAwareness();
+    float S = ImGui_ImplWin32_GetDpiScaleForMonitor(MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY)); gS = S;
+    { // папка данных теперь .ptlauncher; данные из старой .mclauncher переносим один раз
+        fs::path ap = fs::path(Env(L"APPDATA")), old = ap / ".mclauncher"; gCfgDir = ap / ".ptlauncher"; std::error_code e0;
+        if (!fs::exists(gCfgDir, e0) && fs::exists(old, e0)) { fs::rename(old, gCfgDir, e0); if (e0) gCfgDir = old; }
         gRoot = gCfgDir;
     }
     std::error_code ec; fs::create_directories(gCfgDir, ec);
+    WNDCLASSEXW wc{sizeof(wc), CS_CLASSDC, WndProc, 0, 0, hi, nullptr, LoadCursor(nullptr, IDC_ARROW), nullptr, nullptr, L"PTL", nullptr};
+    RegisterClassExW(&wc);
+    gHwnd = CreateWindowW(L"PTL", L"PTLauncher", WS_OVERLAPPEDWINDOW, 100, 100, (int)(1100 * S), (int)(680 * S), nullptr, nullptr, hi, nullptr);
 
-    glfwSetErrorCallback(GlfwErr);
-    if (!glfwInit()) { fprintf(stderr, "Не удалось инициализировать GLFW (нет X11/Wayland-сессии?)\n"); return 1; }
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3); glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
-#ifdef GLFW_X11_CLASS_NAME
-    glfwWindowHintString(GLFW_X11_CLASS_NAME, "PTLauncher"); glfwWindowHintString(GLFW_X11_INSTANCE_NAME, "PTLauncher");
-#endif
-#ifdef GLFW_WAYLAND_APP_ID
-    glfwWindowHintString(GLFW_WAYLAND_APP_ID, "PTLauncher");
-#endif
-    gWin = glfwCreateWindow(1100, 680, "PTLauncher", nullptr, nullptr);
-    if (!gWin) { fprintf(stderr, "Не удалось создать окно OpenGL 3.0\n"); glfwTerminate(); return 1; }
-    glfwMakeContextCurrent(gWin); glfwSwapInterval(1); // VSync — не жжём CPU/GPU
-
-    int ww = 0, wh = 0, fw = 0, fh = 0; glfwGetWindowSize(gWin, &ww, &wh); glfwGetFramebufferSize(gWin, &fw, &fh);
-    float fbs = ww > 0 ? (float)fw / (float)ww : 1.f; if (fbs < 1.01f) fbs = 1.f; // Wayland/HiDPI: фреймбуфер больше окна
-    float xs = 1.f, ys = 1.f; glfwGetWindowContentScale(gWin, &xs, &ys);
-    float S = fbs > 1.f ? 1.f : std::clamp(xs, 1.f, 3.f); gS = S; // X11: масштаб по DPI; Wayland: окно в логических пикселях, а шрифт рисуем в фактических
-    if (S != 1.f) glfwSetWindowSize(gWin, (int)(1100 * S), (int)(680 * S));
-    glfwSetWindowSizeLimits(gWin, (int)(900 * S), (int)(600 * S), GLFW_DONT_CARE, GLFW_DONT_CARE);
+    { // без системного заголовка: тень окна от DWM + пересчёт рамки
+        BOOL comp = FALSE; if (SUCCEEDED(DwmIsCompositionEnabled(&comp)) && comp) { MARGINS mg{1, 1, 1, 1}; DwmExtendFrameIntoClientArea(gHwnd, &mg); }
+        SetWindowPos(gHwnd, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+    }
+    DXGI_SWAP_CHAIN_DESC sd{}; sd.BufferCount = 2; sd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM; sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    sd.OutputWindow = gHwnd; sd.SampleDesc.Count = 1; sd.Windowed = TRUE; sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+    D3D_FEATURE_LEVEL fl; const D3D_FEATURE_LEVEL lv[] = {D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_0};
+    if (FAILED(D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, lv, 2, D3D11_SDK_VERSION, &sd, &gSwap, &gDev, &fl, &gCtx))) {
+        MessageBoxW(nullptr, L"Не удалось создать Direct3D 11", L"PTLauncher", MB_ICONERROR); return 1;
+    }
+    CreateRTV();
+    ShowWindow(gHwnd, SW_SHOWDEFAULT); UpdateWindow(gHwnd);
 
     ImGui::CreateContext(); ImGuiIO& io = ImGui::GetIO(); io.IniFilename = nullptr;
     {
-        float fsc = S * fbs; io.FontGlobalScale = 1.f / fbs;
-        std::string fp = FindFont();
-        static const ImWchar kRanges[] = {0x0020, 0x00FF, 0x0400, 0x052F, 0x2000, 0x206F, 0x20A0, 0x20CF, 0x2190, 0x21FF, 0x2DE0, 0x2DFF, 0xA640, 0xA69F, 0}; // + общая пунктуация
+        wchar_t exe[MAX_PATH]; GetModuleFileNameW(nullptr, exe, MAX_PATH);
+        std::string dir = U8(fs::path(exe).parent_path().wstring());
+        std::vector<std::string> cand = {dir + "\\font.ttf", "C:\\Windows\\Fonts\\segoeui.ttf", "C:\\Windows\\Fonts\\arial.ttf",
+                                         "C:\\Windows\\Fonts\\tahoma.ttf", "C:\\Windows\\Fonts\\verdana.ttf", "C:\\Windows\\Fonts\\calibri.ttf"};
+        bool ok = false; std::string fp; // Латиница + кириллица + общая пунктуация (тире, кавычки, многоточие, •): раньше этих символов в шрифте не было и вместо них рисовались «?»
+        static const ImWchar kRanges[] = {0x0020, 0x00FF, 0x0400, 0x052F, 0x2000, 0x206F, 0x20A0, 0x20CF, 0x2190, 0x21FF, 0x2DE0, 0x2DFF, 0xA640, 0xA69F, 0};
         const ImWchar* rng = kRanges;
-        if (fp.empty() || !io.Fonts->AddFontFromFileTTF(fp.c_str(), 18.f * fsc, nullptr, rng)) { io.Fonts->AddFontDefault(); fprintf(stderr, "Шрифт с кириллицей не найден: положи font.ttf рядом с программой\n"); }
+        for (auto& f : cand)
+            if (fs::exists(P(f)) && io.Fonts->AddFontFromFileTTF(f.c_str(), 18.f * S, nullptr, rng)) { ok = true; fp = f; break; }
+        if (!ok) io.Fonts->AddFontDefault(); // без кириллицы: будут «?»
         else { // крупные шрифты настоящего размера (а не растянутый мелкий): текст остаётся чётким
-            gFTitle = io.Fonts->AddFontFromFileTTF(fp.c_str(), 27.f * fsc, nullptr, rng);
-            gFSub = io.Fonts->AddFontFromFileTTF(fp.c_str(), 23.4f * fsc, nullptr, rng);
+            gFTitle = io.Fonts->AddFontFromFileTTF(fp.c_str(), 27.f * S, nullptr, rng);
+            gFSub = io.Fonts->AddFontFromFileTTF(fp.c_str(), 23.4f * S, nullptr, rng);
         }
     }
-    ImGui_ImplGlfw_InitForOpenGL(gWin, true); ImGui_ImplOpenGL3_Init("#version 130");
+    ImGui_ImplWin32_Init(gHwnd); ImGui_ImplDX11_Init(gDev, gCtx);
 
     LoadConfig();
-    { auto fx = [](std::string& s) { size_t p = s.find("local/share/mclauncher"); if (p != std::string::npos) s.replace(p, 22, ".ptlauncher"); /* путь после переименования папки */ }; fx(cfg.javaPath); fx(cfg.gameDir); fx(cfg.bg); fx(cfg.shotsDir); } // пути после переименования папки
+    { auto fx = [](std::string& s) { size_t p = s.find(".mclauncher"); if (p != std::string::npos) s.replace(p, 11, ".ptlauncher"); }; fx(cfg.javaPath); fx(cfg.gameDir); fx(cfg.bg); fx(cfg.shotsDir); } // пути после переименования папки
     snprintf(bJava, sizeof(bJava), "%s", cfg.javaPath.c_str()); snprintf(bJvm, sizeof(bJvm), "%s", cfg.jvmArgs.c_str()); gLogOn = cfg.logsOn; OpenSessionLog();
     if (!cfg.gameDir.empty()) { // своя папка игры из настроек
         std::error_code e2; fs::create_directories(P(cfg.gameDir), e2);
@@ -3459,14 +3350,10 @@ int main(int, char**) {
 
     bool done = false; auto last = std::chrono::steady_clock::now();
     while (!done) {
-        glfwPollEvents(); TrayPump();
-        switch (gWinCmd.exchange(0)) { // команды из потока запуска игры и от значка в трее
-            case 1: HideToTray(); break;
-            case 2: TrayDel(); glfwShowWindow(gWin); glfwRestoreWindow(gWin); glfwFocusWindow(gWin); break;
-            case 3: glfwSetWindowShouldClose(gWin, GLFW_TRUE); break;
-        }
-        if (glfwWindowShouldClose(gWin)) break;
-        if (glfwGetWindowAttrib(gWin, GLFW_ICONIFIED) || !glfwGetWindowAttrib(gWin, GLFW_VISIBLE)) { Sleep(60); continue; }
+        MSG msg;
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) { TranslateMessage(&msg); DispatchMessageW(&msg); if (msg.message == WM_QUIT) done = true; }
+        if (done) break;
+        if (IsIconic(gHwnd) || !IsWindowVisible(gHwnd)) { Sleep(60); continue; }
         auto now = std::chrono::steady_clock::now(); float dt = std::chrono::duration<float>(now - last).count(); last = now; gTime += dt;
 
         { std::lock_guard<std::mutex> l(gMu); if (gNewAcc) {
@@ -3478,16 +3365,17 @@ int main(int, char**) {
         UpdateBackground(dt);
 
         { int sg = std::clamp(cfg.theme, 0, 4) | (cfg.rounded ? 16 : 0); if (sg != gThemeSig) { gThemeSig = sg; ApplyTheme(); } }
-        ImGui_ImplOpenGL3_NewFrame(); ImGui_ImplGlfw_NewFrame(); ImGui::NewFrame();
-        int cw = 0, ch = 0, bw = 0, bh = 0; glfwGetWindowSize(gWin, &cw, &ch); glfwGetFramebufferSize(gWin, &bw, &bh);
-        DrawUI((float)cw, (float)ch);
+        ImGui_ImplDX11_NewFrame(); ImGui_ImplWin32_NewFrame(); ImGui::NewFrame();
+        RECT rc; GetClientRect(gHwnd, &rc);
+        DrawUI((float)(rc.right - rc.left), (float)(rc.bottom - rc.top));
         ImGui::Render();
-        glViewport(0, 0, bw, bh); glClearColor(0.05f, 0.06f, 0.09f, 1.f); glClear(GL_COLOR_BUFFER_BIT);
-        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-        glfwSwapBuffers(gWin);
+        const float clear[4] = {0.05f, 0.06f, 0.09f, 1.f};
+        if (gRTV) { gCtx->OMSetRenderTargets(1, &gRTV, nullptr); gCtx->ClearRenderTargetView(gRTV, clear); ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData()); }
+        gSwap->Present(1, 0); // VSync — не жжём CPU/GPU
     }
     SaveConfig();
-    ImGui_ImplOpenGL3_Shutdown(); ImGui_ImplGlfw_Shutdown(); ImGui::DestroyContext();
-    glfwDestroyWindow(gWin); glfwTerminate();
-    fflush(nullptr); _exit(0); // фоновые потоки (curl) не ждём
+    ImGui_ImplDX11_Shutdown(); ImGui_ImplWin32_Shutdown(); ImGui::DestroyContext();
+    if (gRTV) gRTV->Release(); gSwap->Release(); gCtx->Release(); gDev->Release();
+    DestroyWindow(gHwnd); UnregisterClassW(L"PTL", hi);
+    return 0;
 }
