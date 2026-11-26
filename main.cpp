@@ -1367,6 +1367,8 @@ static void StartLaunch() {
 static ID3D11Device* gDev; static ID3D11DeviceContext* gCtx; static IDXGISwapChain* gSwap; static ID3D11RenderTargetView* gRTV;
 struct Tex { ID3D11ShaderResourceView* v = nullptr; int w = 0, h = 0; };
 static Tex gBg[2]; static float gFade = 1, gSlideT = 0, gTime = 0;
+static Tex gBlur[2]; static std::vector<unsigned char> gBlurData; static int gBlurW = 0, gBlurH = 0; // размытая копия фона для «жидкого стекла»
+static ImVec2 gBgUV0(0, 0), gBgUV1(1, 1), gBgSz(1, 1); static bool gBgOK = false;               // как фон натянут на экран (для панелей-стекла)
 static std::string gBgNow; static std::vector<std::string> gShots;
 static std::mutex gImgMu; static std::vector<unsigned char> gImgData; static int gImgW, gImgH; static bool gImgReady = false;
 static std::atomic<bool> gImgLoading{false};
@@ -1385,7 +1387,21 @@ static void LoadBgAsync(std::string path) {
                 out[((size_t)y * nw + x) * 4 + c] = (unsigned char)(s / (f * f));
             }
             stbi_image_free(d);
-            std::lock_guard<std::mutex> l(gImgMu); gImgData = std::move(out); gImgW = nw; gImgH = nh; gImgReady = true;
+            // маленькая сильно размытая копия: при растяжении билинейным фильтром получается мягкое «матовое стекло»
+            int bw = 160, bh = std::max(1, (int)((long long)nh * bw / nw)); std::vector<unsigned char> sm((size_t)bw * bh * 4);
+            for (int y = 0; y < bh; y++) for (int x = 0; x < bw; x++) {
+                int x0 = x * nw / bw, x1 = std::max(x0 + 1, (x + 1) * nw / bw), y0 = y * nh / bh, y1 = std::max(y0 + 1, (y + 1) * nh / bh);
+                int sx = std::max(1, (x1 - x0) / 6), sy2 = std::max(1, (y1 - y0) / 6);
+                for (int c = 0; c < 4; c++) { int sum = 0, n = 0; for (int yy = y0; yy < y1; yy += sy2) for (int xx = x0; xx < x1; xx += sx) { sum += out[((size_t)yy * nw + xx) * 4 + c]; n++; } sm[((size_t)y * bw + x) * 4 + c] = (unsigned char)(sum / std::max(1, n)); }
+            }
+            for (int pass = 0; pass < 3; pass++) for (int dir = 0; dir < 2; dir++) {
+                std::vector<unsigned char> t2 = sm;
+                for (int y = 0; y < bh; y++) for (int x = 0; x < bw; x++) for (int c = 0; c < 4; c++) {
+                    int sum = 0, n = 0; for (int k = -3; k <= 3; k++) { int xx = dir == 0 ? std::clamp(x + k, 0, bw - 1) : x, yy = dir == 1 ? std::clamp(y + k, 0, bh - 1) : y; sum += t2[((size_t)yy * bw + xx) * 4 + c]; n++; }
+                    sm[((size_t)y * bw + x) * 4 + c] = (unsigned char)(sum / n);
+                }
+            }
+            std::lock_guard<std::mutex> l(gImgMu); gImgData = std::move(out); gImgW = nw; gImgH = nh; gBlurData = std::move(sm); gBlurW = bw; gBlurH = bh; gImgReady = true;
         }
         gImgLoading = false;
     }).detach();
@@ -1417,6 +1433,8 @@ static void UpdateBackground(float dt) {
         if (gImgReady) {
             if (gBg[1].v) gBg[1].v->Release();
             gBg[1] = gBg[0]; gBg[0] = {MakeTex(gImgData.data(), gImgW, gImgH), gImgW, gImgH};
+            if (gBlur[1].v) gBlur[1].v->Release();
+            gBlur[1] = gBlur[0]; gBlur[0] = {MakeTex(gBlurData.data(), gBlurW, gBlurH), gBlurW, gBlurH}; gBlurData.clear();
             gImgData.clear(); gImgData.shrink_to_fit(); gImgReady = false; gFade = 0;
         }
     }
@@ -1513,14 +1531,25 @@ static ImFont* FSub() { return gFSub ? gFSub : ImGui::GetFont(); }
 
 // Универсальная поверхность. lvl: 0 - кнопка/чип, 1 - карточка, 2 - большая панель (с тенью). hot 0..1 - наведение/выбор. tint - своя подложка (для панелей).
 static void Surface(ImDrawList* dl, ImVec2 a, ImVec2 b, float rr, int lvl = 1, float hot = 0.f, const ImVec4* tint = nullptr) {
-    bool lt = Th().light, gl = GlassOn(); float h = b.y - a.y;
+    bool lt = Th().light, gl = GlassOn(); float h = b.y - a.y, w = b.x - a.x;
     if (lvl >= 2) for (int k = 4; k >= 1; k--) dl->AddRectFilled(ImVec2(a.x - k * 2.f, a.y - k + 5 * gS), ImVec2(b.x + k * 2.f, b.y + k * 3.f + 5 * gS), BA(lt ? .025f : .05f), rr + k * 3.f);
+    if (gl && lvl >= 2 && gBgOK && gBlur[0].v) { // настоящее «матовое стекло»: размытая копия фона ровно под панелью
+        auto uv = [&](ImVec2 p) { return ImVec2(gBgUV0.x + p.x / gBgSz.x * (gBgUV1.x - gBgUV0.x), gBgUV0.y + p.y / gBgSz.y * (gBgUV1.y - gBgUV0.y)); };
+        ImVec2 u0 = uv(a), u1 = uv(b);
+        if (gBlur[1].v && gFade < 1.f) dl->AddImageRounded((ImTextureID)(intptr_t)gBlur[1].v, a, b, u0, u1, IM_COL32_WHITE, rr);
+        dl->AddImageRounded((ImTextureID)(intptr_t)gBlur[0].v, a, b, u0, u1, IM_COL32(255, 255, 255, (int)(255 * gFade)), rr);
+        dl->AddRectFilled(a, b, U32(ImVec4(Th().bg2.x, Th().bg2.y, Th().bg2.z, lt ? .16f : .30f)), rr); // оттенок темы, как у фона
+    }
     if (tint) dl->AddRectFilled(a, b, U32(*tint), rr);
     if (gl) {
-        dl->AddRectFilled(a, b, lt ? WA(.40f + .14f * hot) : WA(.060f + .050f * hot), rr);
-        dl->AddRectFilled(ImVec2(a.x + 1, a.y + 1), ImVec2(b.x - 1, a.y + h * .5f), lt ? WA(.28f) : WA(.065f), rr, ImDrawFlags_RoundCornersTop);
-        dl->AddRect(a, b, lt ? BA(.10f) : WA(.20f), rr, 0, 1.2f);
-        if (rr > 3.f && b.x - a.x > rr * 3.f) dl->AddLine(ImVec2(a.x + rr * .9f, a.y + 1.5f), ImVec2(b.x - rr * .9f, a.y + 1.5f), lt ? WA(.9f) : WA(.36f), 1.3f);
+        dl->AddRectFilled(a, b, lt ? WA(.34f + .14f * hot) : WA(.055f + .055f * hot), rr);                                                       // стеклянная заливка
+        dl->AddRectFilled(ImVec2(a.x + 1, a.y + 1), ImVec2(b.x - 1, a.y + h * .5f), lt ? WA(.26f) : WA(.075f), rr, ImDrawFlags_RoundCornersTop);   // верхний блик
+        dl->AddRectFilled(ImVec2(a.x + 1, b.y - h * .22f), ImVec2(b.x - 1, b.y - 1), lt ? WA(.14f) : WA(.035f), rr, ImDrawFlags_RoundCornersBottom); // свет снизу (преломление)
+        dl->AddRect(ImVec2(a.x + 2, a.y + 2), ImVec2(b.x - 2, b.y - 2), lt ? WA(.35f) : WA(.05f), std::max(0.f, rr - 2.f), 0, 1.f);               // внутренняя кромка
+        dl->AddRect(a, b, lt ? BA(.08f) : WA(.10f), rr, 0, 1.2f);                                                                                // общая кромка
+        dl->PushClipRect(a, ImVec2(b.x, a.y + h * .45f), true); dl->AddRect(a, b, lt ? WA(.95f) : WA(.46f), rr, 0, 1.5f); dl->PopClipRect();      // яркая верхняя кромка
+        dl->PushClipRect(ImVec2(a.x, b.y - h * .30f), b, true); dl->AddRect(a, b, lt ? BA(.12f) : WA(.17f), rr, 0, 1.2f); dl->PopClipRect();      // мягкая нижняя
+        if (rr > 3.f && w > rr * 3.f) dl->AddLine(ImVec2(a.x + rr * .9f, a.y + 1.5f), ImVec2(b.x - rr * .9f, a.y + 1.5f), lt ? WA(.95f) : WA(.45f), 1.4f);
     } else {
         dl->AddRectFilled(a, b, lt ? BA(.06f + .04f * hot) : WA(.070f + .050f * hot), rr);
         dl->AddRectFilled(ImVec2(a.x + 1, a.y + 1), ImVec2(b.x - 1, a.y + h * .45f), lt ? WA(.20f) : WA(.030f), rr, ImDrawFlags_RoundCornersTop);
@@ -1528,7 +1557,7 @@ static void Surface(ImDrawList* dl, ImVec2 a, ImVec2 b, float rr, int lvl = 1, f
     }
     if (hot > 0.01f) dl->AddRect(a, b, AccA(.60f * hot), rr, 0, 1.5f * gS);
 }
-static ImVec4 PanelTint(float a) { ImVec4 c = Th().panel; c.w *= a * (GlassOn() ? .55f : 1.f); return c; }
+static ImVec4 PanelTint(float a) { ImVec4 c = Th().panel; c.w *= a * (GlassOn() ? (gBgOK ? .30f : .55f) : 1.f); return c; }
 
 static void DrawLogo(ImDrawList* dl, ImVec2 c, float s) { // логотип: призрак на акцентной плитке
     ImVec2 a(c.x - s / 2, c.y - s / 2), b(c.x + s / 2, c.y + s / 2); float rr = R(s * .3f), k = s * .5f; ImU32 w = WA(.96f);
@@ -1558,8 +1587,9 @@ static bool FancyBtn(const char* label, ImVec2 sz, ImVec4 col, bool enabled = tr
         c.x = std::min(1.f, c.x + .10f * t); c.y = std::min(1.f, c.y + .10f * t); c.z = std::min(1.f, c.z + .10f * t);
         if (enabled) for (int i = 3; i >= 1; i--) dl->AddRectFilled(ImVec2(p.x - i * 2.5f, p.y - i * 1.2f + 3 * gS), ImVec2(q.x + i * 2.5f, q.y + i * 2.5f + 3 * gS), U32(ImVec4(c.x, c.y, c.z, (.055f + .05f * t))), rr + i * 2.5f);
         dl->AddRectFilled(p, q, U32(c), rr);
-        dl->AddRectFilled(ImVec2(p.x + 1, p.y + 1), ImVec2(q.x - 1, p.y + sz.y * .5f), WA(GlassOn() ? .22f : .10f), rr, ImDrawFlags_RoundCornersTop);
-        dl->AddRect(p, q, WA(GlassOn() ? .30f : .14f), rr, 0, 1.f);
+        dl->AddRectFilled(ImVec2(p.x + 1, p.y + 1), ImVec2(q.x - 1, p.y + sz.y * .5f), WA(GlassOn() ? .26f : .10f), rr, ImDrawFlags_RoundCornersTop);
+        if (GlassOn()) dl->AddRectFilled(ImVec2(p.x + 1, q.y - sz.y * .25f), ImVec2(q.x - 1, q.y - 1), WA(.07f), rr, ImDrawFlags_RoundCornersBottom);
+        dl->AddRect(p, q, WA(GlassOn() ? .38f : .14f), rr, 0, 1.f);
     } else Surface(dl, p, q, rr, 0, enabled ? t : 0.f);
     ImVec2 ts = ImGui::CalcTextSize(label, hid);
     ImU32 tc = strong ? OnAccent(enabled ? 1.f : .55f) : TextCol(enabled ? 1.f : .5f);
@@ -1951,16 +1981,18 @@ static void MsUploadSkinThread(Account a, std::string path, bool slim) { // за
 }
 
 static float gWaveT = -1.f; // время с начала приветственного взмаха рукой (-1 = не машет)
+static bool gFollowOn = false; // слежение за курсором включается после приветственного взмаха
 static void StartWave() { if (gWaveT < 0) gWaveT = 0.f; }
 static float Smooth01(float x) { x = std::clamp(x, 0.f, 1.f); return x * x * (3 - 2 * x); }
 static float gLookHY = 0, gLookHP = 0, gLookBY = 0;
 // Рисует игрока. follow = смотрит за курсором и поворачивается к нему (как в инвентаре игры); иначе угол задаёт userYaw (вращение мышью)
 static void DrawSkinModel(ImDrawList* dl, ImVec2 c, float sc, bool follow, float userYaw) {
     ImGuiIO& io = ImGui::GetIO(); float dt = std::min(io.DeltaTime, 0.05f);
-    if (gWaveT >= 0.f) { gWaveT += dt; if (gWaveT > 2.8f) gWaveT = -1.f; }
+    if (gWaveT >= 0.f) { gWaveT += dt; if (gWaveT > 2.8f) { gWaveT = -1.f; gFollowOn = true; } }
     SkinPose P; P.slim = gSkinLocal ? cfg.skinSlim : gSkinSlim; P.cape = cfg.showCape && gHasCape && gCapeTex.v;
     float tHY = 0, tHP = 0, tBY = 0;
-    if (follow && ImGui::IsMousePosValid()) {
+    if (follow && !gFollowOn) tHY = 0.30f; // до конца приветствия: голова повёрнута на зрителя
+    if (follow && gFollowOn && ImGui::IsMousePosValid()) {
         float hx = c.x, hy = c.y - 12 * sc; // голова
         float dx = std::clamp((io.MousePos.x - hx) / (sc * 14.f), -1.f, 1.f), dy = std::clamp((io.MousePos.y - hy) / (sc * 14.f), -1.f, 1.f);
         tHY = dx * 0.95f; tHP = dy * 0.5f; tBY = dx * 0.38f;
@@ -2307,7 +2339,6 @@ static void StageView(ImDrawList* dl, ImVec2 a, ImVec2 b) { // сцена с и�
     float sh = b.y - a.y, sc = std::min((sh - em * 4.6f) / 33.f, (b.x - a.x) / 24.f); if (sc < 1.f) sc = 1.f;
     ImVec2 c((a.x + b.x) / 2, a.y + em * 1.2f + 16.5f * sc);
     DrawSkinModel(dl, c, sc, true, 0.f);
-    ImGui::SetCursorScreenPos(ImVec2(c.x - 9 * sc, a.y)); if (ImGui::InvisibleButton("##skinhit", ImVec2(18 * sc, sh))) StartWave();
     const Account* ac = (cfg.sel >= 0 && cfg.sel < (int)cfg.accs.size()) ? &cfg.accs[cfg.sel] : nullptr;
     std::string nick = ac ? ac->name : std::string(T("Гость", "Guest"));
     ImFont* f = FSub(); ImVec2 ns = ImGui::CalcTextSize(nick.c_str()); float tw = ns.x * (f->FontSize / ImGui::GetFontSize());
@@ -2361,23 +2392,7 @@ static void DrawNav(float x, float y, float w, float h) {
         if (it.scr < 0) folderPos = rm;
         yy += ih + gap;
     }
-    { // внизу: аккаунт и настройки
-        float ay = y + h - pad - ih, accH = em * 3.3f, accY = ay - gap - accH;
-        if (Row(5, T("Настройки", "Settings"), cur == S_SET, ay, nullptr)) Go(S_SET);
-        ImGui::SetCursorScreenPos(ImVec2(x + pad, accY)); ImGui::PushID("accchip");
-        bool clk = ImGui::InvisibleButton("##ac", ImVec2(iw, accH)); float t = AnimK("h", ImGui::IsItemHovered() ? 1.f : 0.f, 14.f);
-        ImVec2 a(x + pad, accY), b(a.x + iw, a.y + accH); Surface(dl, a, b, R(accH * .3f), 0, (cur == S_ACC ? 1.f : t * .6f));
-        float fs = std::min(accH * .64f, iw - em * .6f); ImVec2 f0(compact ? (a.x + b.x) / 2 - fs / 2 : a.x + em * .6f, a.y + (accH - fs) / 2);
-        DrawFace(dl, f0, ImVec2(f0.x + fs, f0.y + fs), R(fs * .26f));
-        if (!compact) {
-            const Account* ac = (cfg.sel >= 0 && cfg.sel < (int)cfg.accs.size()) ? &cfg.accs[cfg.sel] : nullptr;
-            std::string nm = ac ? ac->name : std::string(T("Добавить аккаунт", "Add account")), sb = ac ? AccTypeName(*ac) : std::string(T("Войти", "Sign in"));
-            float tx = f0.x + fs + em * .7f; ImVec4 clip(tx, a.y, b.x - em * .3f, b.y);
-            dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(tx, a.y + accH * .5f - em * 1.05f), TextCol(), nm.c_str(), nullptr, 0.f, &clip);
-            dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(tx, a.y + accH * .5f + em * .05f), TextCol(.55f), sb.c_str(), nullptr, 0.f, &clip);
-        }
-        ImGui::PopID(); if (clk) Go(S_ACC);
-    }
+    { float ay = y + h - pad - ih; if (Row(5, T("Настройки", "Settings"), cur == S_SET, ay, nullptr)) Go(S_SET); } // внизу только настройки
     ImGui::SetNextWindowPos(ImVec2(folderPos.x + 6, folderPos.y)); ImGui::SetNextWindowSize(ImVec2(em * 15, 0));
     if (ImGui::BeginPopup("##folders")) {
         fs::path gd = CurrentInstanceDir(); std::error_code ec;
@@ -2410,7 +2425,7 @@ static void PlayBar(float W, float H, float rowH, float statusH) {
     }
     float total = std::min(W, em * 64.f), wl = (total - 2 * sp) * 0.27f, wc = total - 2 * sp - 2 * wl, x0 = (W - total) / 2; bool busy = gBusy;
     ImGui::SetCursorPos(ImVec2(x0, yRow));
-    if (FancyBtn(T("Создать сборку", "Create build"), ImVec2(wl, rowH), gSoft)) Go(S_BUILDS);
+    if (FancyBtn(T("Сборки", "Builds"), ImVec2(wl, rowH), gSoft)) Go(S_BUILDS);
     ImGui::SetCursorPos(ImVec2(x0 + wl + sp, yRow));
     if (busy) { // идёт загрузка/запуск: слева статус, справа «Остановить» (или «Закрыть», когда игра уже запущена)
         bool run = gGameRunning, req = gCancel;
@@ -2439,6 +2454,14 @@ static void PlayBar(float W, float H, float rowH, float statusH) {
     }
 }
 
+static void PlayTimePill(ImDrawList* dl, ImVec2 topRight) { // «В игре: N мин» поверх сцены, справа сверху (клик - статистика)
+    float em = ImGui::GetFontSize(); std::string pt = std::string(T("В игре: ", "Played: ")) + FmtDur(cfg.playSec);
+    ImVec2 ts = ImGui::CalcTextSize(pt.c_str()); float h = em * 2.2f, w = ts.x + em * 2.4f; ImVec2 q(topRight.x - w - em * .9f, topRight.y + em * .9f);
+    ImGui::SetCursorScreenPos(q); bool clk = ImGui::InvisibleButton("##playtime", ImVec2(w, h)); float t = AnimK("h", ImGui::IsItemHovered() ? 1.f : 0.f, 14.f);
+    dl->AddRectFilled(q, ImVec2(q.x + w, q.y + h), BA(.40f), R(h * .5f)); dl->AddRect(q, ImVec2(q.x + w, q.y + h), WA(.18f + .20f * t), R(h * .5f), 0, 1.2f);
+    dl->AddText(ImVec2(q.x + (w - ts.x) / 2, q.y + (h - ts.y) / 2), IM_COL32(255, 255, 255, 235), pt.c_str());
+    if (clk) Go(S_STATS);
+}
 // ---------- Главный экран: «Игровой» (персонаж по центру) и «Библиотека» (сетка сборок + недавние миры) ----------
 struct RWorld { std::string name, date; long long t = 0; };
 static std::vector<RWorld> gRW; static float gRWT = 99.f; static std::string gRWBuild;
@@ -2465,32 +2488,11 @@ static void ScrMain() {
     float em = ImGui::GetFontSize(); ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 org = ImGui::GetCursorScreenPos(); float W = ImGui::GetContentRegionAvail().x, H = ImGui::GetContentRegionAvail().y, sp = ImGui::GetStyle().ItemSpacing.x;
     ScanBuilds(false);
-    float rowH = em * 3.1f, statusH = em * 2.3f, topH = em * 2.7f;
-    const Build* cb = FindBuild(cfg.buildId);
-    { // верхняя строка: выбранная сборка (клик - список сборок) и время в игре (клик - статистика)
-        float cwid = std::min(W * .58f, em * 28.f); ImGui::SetCursorPos(ImVec2(0, 0)); ImVec2 p = ImGui::GetCursorScreenPos();
-        bool clk = ImGui::InvisibleButton("##buildchip", ImVec2(cwid, topH)); float t = AnimK("h", ImGui::IsItemHovered() ? 1.f : 0.f, 14.f);
-        Surface(dl, p, ImVec2(p.x + cwid, p.y + topH), R(topH * .4f), 0, t);
-        float ts = topH * .66f; ImVec2 t0(p.x + topH * .17f, p.y + (topH - ts) / 2);
-        ImVec4 lc = cb ? LoaderColor(cb->loader) : gAccent; dl->AddRectFilled(t0, ImVec2(t0.x + ts, t0.y + ts), U32(lc), R(ts * .3f));
-        { std::string ch = cb ? cb->loader.substr(0, 1) : std::string("+"); ImVec2 cs = ImGui::CalcTextSize(ch.c_str()); dl->AddText(ImVec2(t0.x + (ts - cs.x) / 2, t0.y + (ts - cs.y) / 2), IM_COL32(20, 20, 28, 235), ch.c_str()); }
-        std::string nm = cb ? cb->name : std::string(T("Сборка не выбрана", "No build selected")), sb = cb ? cb->loader + "  " + cb->ver : std::string(T("Нажми, чтобы выбрать или создать", "Click to choose or create"));
-        float tx = t0.x + ts + em * .8f; ImVec4 clip(tx, p.y, p.x + cwid - em * 2.2f, p.y + topH);
-        dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(tx, p.y + topH * .5f - em * 1.1f), TextCol(), nm.c_str(), nullptr, 0.f, &clip);
-        dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(tx, p.y + topH * .5f + em * .05f), TextCol(.55f), sb.c_str(), nullptr, 0.f, &clip);
-        { ImVec2 m(p.x + cwid - em * 1.2f, p.y + topH / 2); float s = em * .3f; ImU32 c = TextCol(.5f + .5f * t); dl->AddLine(ImVec2(m.x - s * .5f, m.y - s), ImVec2(m.x + s * .5f, m.y), c, 2.f); dl->AddLine(ImVec2(m.x + s * .5f, m.y), ImVec2(m.x - s * .5f, m.y + s), c, 2.f); }
-        if (clk) Go(S_BUILDS);
-        std::string pt = std::string(T("В игре: ", "Played: ")) + FmtDur(cfg.playSec); float pw = ImGui::CalcTextSize(pt.c_str()).x + em * 2.4f;
-        if (W > cwid + pw + em * 2) {
-            ImGui::SetCursorPos(ImVec2(W - pw, 0)); ImVec2 q = ImGui::GetCursorScreenPos(); bool c2 = ImGui::InvisibleButton("##playtime", ImVec2(pw, topH)); float t2 = AnimK("h", ImGui::IsItemHovered() ? 1.f : 0.f, 14.f);
-            Surface(dl, q, ImVec2(q.x + pw, q.y + topH), R(topH * .4f), 0, t2);
-            ImVec2 s2 = ImGui::CalcTextSize(pt.c_str()); dl->AddText(ImVec2(q.x + (pw - s2.x) / 2, q.y + (topH - s2.y) / 2), TextCol(.8f), pt.c_str());
-            if (c2) Go(S_STATS);
-        }
-    }
-    float sy = topH + em * .7f, sh = std::max(em * 9.f, H - rowH - statusH - em * .5f - sy);
+    float rowH = em * 3.1f, statusH = em * 2.3f;
+    float sy = 0.f, sh = std::max(em * 9.f, H - rowH - statusH - em * .5f);
     if (cfg.home == 1) { // ---- Игровой ----
         StageView(dl, ImVec2(org.x, org.y + sy), ImVec2(org.x + W, org.y + sy + sh));
+        PlayTimePill(dl, ImVec2(org.x + W, org.y + sy));
     } else { // ---- Библиотека ----
         float gap = em * .9f, lw = std::min(std::max(em * 22.f, W * .60f), W - em * 16.f), gridH = sh * .62f;
         ImGui::SetCursorPos(ImVec2(0, sy));
@@ -2536,6 +2538,7 @@ static void ScrMain() {
             }
         }
         StageView(dl, ImVec2(org.x + lw + gap, org.y + sy), ImVec2(org.x + W, org.y + sy + sh));
+        PlayTimePill(dl, ImVec2(org.x + W, org.y + sy));
     }
     PlayBar(W, H, rowH, statusH);
 }
@@ -2743,7 +2746,7 @@ static void ScrAccounts() {
     }
     if (cfg.accs.empty()) TD(T("Пока нет ни одного аккаунта", "No accounts yet"));
     ImGui::EndChild();
-    if (del >= 0) { cfg.accs.erase(cfg.accs.begin() + del); if (cfg.accs.empty()) cfg.sel = -1; else if (cfg.sel == del) cfg.sel = 0; else if (cfg.sel > del) cfg.sel--; SaveConfig(); }
+    if (del >= 0) { if (cfg.lastNick == cfg.accs[del].name) cfg.lastNick.clear(); cfg.accs.erase(cfg.accs.begin() + del); if (cfg.accs.empty()) cfg.sel = -1; else if (cfg.sel == del) cfg.sel = 0; else if (cfg.sel > del) cfg.sel--; SaveConfig(); }
     std::string st; { std::lock_guard<std::mutex> l(gMu); st = gAuthMsg; }
     if (!st.empty()) ImGui::TextWrapped("%s", st.c_str());
 }
@@ -3431,9 +3434,10 @@ static float EaseOutBack(float x) { float c1 = 1.70158f, c3 = c1 + 1.f; x = std:
 static float gToastT = -1.f; static bool gToastDone = false;
 static void DrawToast(float W) { // плашка-приветствие сверху, как уведомление на iPhone: выезжает, висит несколько секунд и уезжает
     const Theme& th = Th(); float em = ImGui::GetFontSize(), dt = std::min(ImGui::GetIO().DeltaTime, 0.05f);
-    std::string nick = cfg.lastNick; // ник последнего запуска; если ещё не запускали - ник выбранного аккаунта
-    if (nick.empty() && cfg.sel >= 0 && cfg.sel < (int)cfg.accs.size()) nick = cfg.accs[cfg.sel].name;
+    std::string nick; // приветствуем только выбранный сейчас аккаунт (удалённые больше не всплывают)
+    if (cfg.sel >= 0 && cfg.sel < (int)cfg.accs.size()) nick = cfg.accs[cfg.sel].name;
     if (!gToastDone && gTime > 0.9f && !nick.empty()) { gToastDone = true; gToastT = 0.f; StartWave(); }
+    if (!gToastDone && gTime > 0.9f && nick.empty()) gFollowOn = true; // приветствовать некого: сразу следим за курсором
     if (gToastT < 0.f) return;
     gToastT += dt; const float tIn = 0.5f, hold = 4.2f, tOut = 0.45f, total = tIn + hold + tOut;
     if (gToastT > total) { gToastT = -1.f; return; }
@@ -3465,12 +3469,13 @@ static void DrawCover(ImDrawList* dl, const Tex& t, float alpha, ImVec2 sz) {
     float z = 0.02f + 0.02f * (0.5f + 0.5f * sinf(gTime * 0.15f)); // медленный "Ken Burns"-зум
     float cx = (a.x + b.x) / 2, cy = (a.y + b.y) / 2, hw = (b.x - a.x) / 2 * (1 - z), hh = (b.y - a.y) / 2 * (1 - z);
     dl->AddImage((ImTextureID)(intptr_t)t.v, ImVec2(0, 0), sz, ImVec2(cx - hw, cy - hh), ImVec2(cx + hw, cy + hh), IM_COL32(255, 255, 255, (int)(alpha * 255)));
+    gBgUV0 = ImVec2(cx - hw, cy - hh); gBgUV1 = ImVec2(cx + hw, cy + hh); gBgSz = sz; // для размытых панелей
 }
 
 static void DrawUI(float W, float H) {
     const Theme& th = Th(); bool lt = th.light; ImVec2 sz(W, H);
     auto U = [](const ImVec4& c) { return ImGui::ColorConvertFloat4ToU32(c); };
-    ImDrawList* bg = ImGui::GetBackgroundDrawList();
+    ImDrawList* bg = ImGui::GetBackgroundDrawList(); gBgOK = false;
     if (!th.glass) bg->AddRectFilled(ImVec2(0, 0), sz, U(th.bg1)); // плоские темы: сплошной цвет, без картинки
     else {
         if (!gBg[0].v) {
@@ -3480,7 +3485,7 @@ static void DrawUI(float W, float H) {
             bg->AddRectFilledMultiColor(ImVec2(0, 0), sz, U(c1), U(c1), U(c2), U(c2));
         } else {
             if (gBg[1].v && gFade < 1.f) DrawCover(bg, gBg[1], 1.f, sz);
-            DrawCover(bg, gBg[0], gFade, sz);
+            DrawCover(bg, gBg[0], gFade, sz); gBgOK = gBlur[0].v != nullptr;
             bg->AddRectFilled(ImVec2(0, 0), sz, U(ImVec4(th.bg2.x, th.bg2.y, th.bg2.z, lt ? .20f : .42f))); // оттенок темы поверх скриншота
         }
         if (lt) bg->AddRectFilledMultiColor(ImVec2(0, 0), sz, IM_COL32(255, 255, 255, 110), IM_COL32(255, 255, 255, 30), IM_COL32(255, 255, 255, 30), IM_COL32(255, 255, 255, 110));
@@ -3494,9 +3499,8 @@ static void DrawUI(float W, float H) {
     float em = ImGui::GetFontSize(), intro = AnimK("intro", 1.f, 2.5f);
     ImDrawList* dl = ImGui::GetWindowDrawList();
     float tbH = em * 2.8f; gCapH = tbH; // верхняя полоса: за неё окно можно таскать
-    { // логотип, название и версия
-        float ls = em * 1.75f; DrawLogo(dl, ImVec2(em * 1.0f + ls / 2, tbH / 2 + em * .1f), ls);
-        ImFont* f = FSub(); float tx = em * 1.0f + ls + em * .7f; dl->AddText(f, f->FontSize, ImVec2(tx, tbH / 2 + em * .1f - f->FontSize / 2), TextCol(), kAppName);
+    { // название и версия
+        ImFont* f = FSub(); float tx = em * 1.2f; dl->AddText(f, f->FontSize, ImVec2(tx, tbH / 2 + em * .1f - f->FontSize / 2), TextCol(), kAppName);
         std::string vs = std::string("v") + kVer; ImVec2 vz = ImGui::CalcTextSize(vs.c_str()), nz = ImGui::CalcTextSize(kAppName); float vx = tx + nz.x * (f->FontSize / ImGui::GetFontSize()) + em * .8f;
         Surface(dl, ImVec2(vx, tbH / 2 + em * .1f - em * .75f), ImVec2(vx + vz.x + em * 1.2f, tbH / 2 + em * .1f + em * .75f), R(em * .75f), 0);
         dl->AddText(ImVec2(vx + em * .6f, tbH / 2 + em * .1f - vz.y / 2), TextCol(.65f), vs.c_str());
