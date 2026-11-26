@@ -1048,6 +1048,8 @@ struct Config {
     bool snapshots = false, showBeta = false, showAlpha = false, slideshow = true, skinSlim = false, showCape = true;
     int ramMB = 4096, sel = -1, onLaunch = 0; // onLaunch: 0 оставить, 1 свернуть, 2 закрыть
     int lang = 0, theme = 0, gpu = 0;         // язык (0 ru, 1 en), тема оформления (0..4), видеокарта
+    int style = 1, home = 1;                  // стиль: 0 Классический, 1 Жидкое стекло; главный экран: 0 Библиотека, 1 Игровой
+    bool charScene = true; std::string charBg; // сцена за персонажем и своя картинка вместо неё
     bool rounded = true, modsOn = true, logsOn = true;
     long long playSec = 0; int launches = 0;  // общая статистика
     std::string jvmArgs;
@@ -1058,7 +1060,7 @@ static std::atomic<long long> gStatSec{0}; static std::atomic<int> gStatLaunch{0
 static void SaveConfig() {
     json j; j["loader"] = cfg.loader; j["version"] = cfg.version; j["java"] = cfg.javaPath; j["bg"] = cfg.bg; j["shots"] = cfg.shotsDir;
     j["snap"] = cfg.snapshots; j["slide"] = cfg.slideshow; j["ram"] = cfg.ramMB; j["sel"] = cfg.sel; j["msid"] = MsId(); j["gamedir"] = cfg.gameDir; j["beta"] = cfg.showBeta; j["alpha"] = cfg.showAlpha; j["onlaunch"] = cfg.onLaunch;
-    j["lang"] = cfg.lang; j["theme"] = cfg.theme; j["gpu"] = cfg.gpu; j["round"] = cfg.rounded; j["mods"] = cfg.modsOn; j["logs"] = cfg.logsOn; j["jvm"] = cfg.jvmArgs; j["ofbuild"] = cfg.optiBuild;
+    j["style"] = cfg.style; j["home"] = cfg.home; j["scene"] = cfg.charScene; j["charbg"] = cfg.charBg; j["lang"] = cfg.lang; j["theme"] = cfg.theme; j["gpu"] = cfg.gpu; j["round"] = cfg.rounded; j["mods"] = cfg.modsOn; j["logs"] = cfg.logsOn; j["jvm"] = cfg.jvmArgs; j["ofbuild"] = cfg.optiBuild;
     j["build"] = cfg.buildId; j["lastnick"] = cfg.lastNick; j["skin"] = cfg.skinPath; j["cape"] = cfg.capePath; j["slim"] = cfg.skinSlim; j["showcape"] = cfg.showCape; j["playsec"] = cfg.playSec; j["launches"] = cfg.launches;
     for (auto& a : cfg.accs) j["accs"].push_back({{"type", a.type}, {"name", a.name}, {"uuid", a.uuid}, {"token", a.token}, {"refresh", a.refresh}});
     WriteAll(gCfgDir / "config.json", j.dump(2));
@@ -1070,14 +1072,14 @@ static void LoadConfig() {
         cfg.snapshots = j.value("snap", false); cfg.slideshow = j.value("slide", true); cfg.ramMB = j.value("ram", 4096); cfg.sel = j.value("sel", -1);
         { std::string id = j.value("msid", ""); if (!id.empty()) SetMsId(id); }
         cfg.gameDir = j.value("gamedir", ""); cfg.showBeta = j.value("beta", false); cfg.showAlpha = j.value("alpha", false); cfg.onLaunch = j.value("onlaunch", 0);
-        cfg.lang = j.value("lang", 0); cfg.gpu = j.value("gpu", 0); cfg.rounded = j.value("round", true);
+        cfg.style = j.value("style", 1); cfg.home = j.value("home", 1); cfg.charScene = j.value("scene", true); cfg.charBg = j.value("charbg", ""); cfg.lang = j.value("lang", 0); cfg.gpu = j.value("gpu", 0); cfg.rounded = j.value("round", true);
         cfg.theme = j.contains("theme") ? j.value("theme", 0) : (j.value("light", false) ? 2 : 0); // старая светлая тема -> «Светлая»
         cfg.modsOn = j.value("mods", true); cfg.logsOn = j.value("logs", true); cfg.jvmArgs = j.value("jvm", ""); cfg.optiBuild = j.value("ofbuild", "");
         cfg.buildId = j.value("build", ""); cfg.lastNick = j.value("lastnick", ""); cfg.skinPath = j.value("skin", ""); cfg.capePath = j.value("cape", "");
         cfg.skinSlim = j.value("slim", false); cfg.showCape = j.value("showcape", true); cfg.playSec = j.value("playsec", 0LL); cfg.launches = j.value("launches", 0);
         if (j.contains("accs")) for (auto& a : j["accs"]) cfg.accs.push_back({a.value("type", 0), a.value("name", ""), a.value("uuid", ""), a.value("token", ""), a.value("refresh", "")});
     } catch (...) {}
-    cfg.theme = std::clamp(cfg.theme, 0, 4);
+    cfg.theme = std::clamp(cfg.theme, 0, 4); cfg.style = std::clamp(cfg.style, 0, 1); cfg.home = std::clamp(cfg.home, 0, 1); cfg.rounded = true; // скругления теперь всегда включены
 }
 
 // ============================ Экземпляры ============================
@@ -1475,7 +1477,8 @@ static void ApplyTheme() {
     ImGuiStyle& st = ImGui::GetStyle(); st = ImGuiStyle();
     if (lt) ImGui::StyleColorsLight(&st); else ImGui::StyleColorsDark(&st);
     float r = cfg.rounded ? 1.f : 0.f;
-    st.FrameRounding = 8 * r; st.PopupRounding = 10 * r; st.GrabRounding = 8 * r; st.ScrollbarRounding = 8 * r; st.WindowRounding = 12 * r; st.ChildRounding = 8 * r;
+    st.FrameRounding = 10 * r; st.PopupRounding = 14 * r; st.GrabRounding = 10 * r; st.ScrollbarRounding = 10 * r; st.WindowRounding = 16 * r; st.ChildRounding = 12 * r;
+    st.ScrollbarSize = 10; st.PopupBorderSize = 1; st.FrameBorderSize = 0; st.ItemSpacing = ImVec2(10, 11);
     st.FramePadding = ImVec2(10, 7); st.ItemSpacing = ImVec2(10, 10); st.ScaleAllSizes(gS);
     ImVec4* c = st.Colors; ImVec4 pop(th.pvBg.x, th.pvBg.y, th.pvBg.z, .98f);
     if (lt) {
@@ -1486,7 +1489,9 @@ static void ApplyTheme() {
         c[ImGuiCol_FrameBg] = ImVec4(1, 1, 1, .08f); c[ImGuiCol_FrameBgHovered] = ImVec4(1, 1, 1, .14f); c[ImGuiCol_FrameBgActive] = ImVec4(1, 1, 1, .18f);
         c[ImGuiCol_Button] = ImVec4(1, 1, 1, .12f);
     }
-    c[ImGuiCol_PopupBg] = pop; c[ImGuiCol_WindowBg] = pop;
+    c[ImGuiCol_PopupBg] = pop; c[ImGuiCol_WindowBg] = pop; c[ImGuiCol_Border] = th.border;
+    c[ImGuiCol_ScrollbarBg] = ImVec4(0, 0, 0, 0); c[ImGuiCol_ScrollbarGrab] = lt ? ImVec4(0, 0, 0, .20f) : ImVec4(1, 1, 1, .18f);
+    c[ImGuiCol_ScrollbarGrabHovered] = lt ? ImVec4(0, 0, 0, .32f) : ImVec4(1, 1, 1, .30f); c[ImGuiCol_ScrollbarGrabActive] = lt ? ImVec4(0, 0, 0, .42f) : ImVec4(1, 1, 1, .40f);
     c[ImGuiCol_CheckMark] = gAccent; c[ImGuiCol_SliderGrab] = gAccent; c[ImGuiCol_SliderGrabActive] = gAccent;
     c[ImGuiCol_Header] = ImVec4(gAccent.x, gAccent.y, gAccent.z, .35f); c[ImGuiCol_HeaderHovered] = ImVec4(gAccent.x, gAccent.y, gAccent.z, .5f);
     c[ImGuiCol_ButtonHovered] = ImVec4(gAccent.x, gAccent.y, gAccent.z, .45f); c[ImGuiCol_ButtonActive] = ImVec4(gAccent.x, gAccent.y, gAccent.z, .6f);
@@ -1497,6 +1502,45 @@ static float Anim(ImGuiID id, float target, float speed, float def = 0.f) {
 }
 static float AnimK(const char* k, float target, float speed, float def = 0.f) { return Anim(ImGui::GetID(k), target, speed, def); }
 
+// ---------- Дизайн-система: два стиля (0 Классический, 1 Жидкое стекло) ----------
+static bool GlassOn() { return cfg.style == 1; }
+static ImU32 U32(const ImVec4& c) { return ImGui::ColorConvertFloat4ToU32(c); }
+static ImU32 WA(float a) { return IM_COL32(255, 255, 255, (int)(std::clamp(a, 0.f, 1.f) * 255)); }
+static ImU32 BA(float a) { return IM_COL32(0, 0, 0, (int)(std::clamp(a, 0.f, 1.f) * 255)); }
+static ImU32 AccA(float a) { return U32(ImVec4(gAccent.x, gAccent.y, gAccent.z, std::clamp(a, 0.f, 1.f))); }
+static ImVec4 Mix(const ImVec4& a, const ImVec4& b, float t) { return ImVec4(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t, a.w + (b.w - a.w) * t); }
+static ImFont* FSub() { return gFSub ? gFSub : ImGui::GetFont(); }
+
+// Универсальная поверхность. lvl: 0 - кнопка/чип, 1 - карточка, 2 - большая панель (с тенью). hot 0..1 - наведение/выбор. tint - своя подложка (для панелей).
+static void Surface(ImDrawList* dl, ImVec2 a, ImVec2 b, float rr, int lvl = 1, float hot = 0.f, const ImVec4* tint = nullptr) {
+    bool lt = Th().light, gl = GlassOn(); float h = b.y - a.y;
+    if (lvl >= 2) for (int k = 4; k >= 1; k--) dl->AddRectFilled(ImVec2(a.x - k * 2.f, a.y - k + 5 * gS), ImVec2(b.x + k * 2.f, b.y + k * 3.f + 5 * gS), BA(lt ? .025f : .05f), rr + k * 3.f);
+    if (tint) dl->AddRectFilled(a, b, U32(*tint), rr);
+    if (gl) {
+        dl->AddRectFilled(a, b, lt ? WA(.40f + .14f * hot) : WA(.060f + .050f * hot), rr);
+        dl->AddRectFilled(ImVec2(a.x + 1, a.y + 1), ImVec2(b.x - 1, a.y + h * .5f), lt ? WA(.28f) : WA(.065f), rr, ImDrawFlags_RoundCornersTop);
+        dl->AddRect(a, b, lt ? BA(.10f) : WA(.20f), rr, 0, 1.2f);
+        if (rr > 3.f && b.x - a.x > rr * 3.f) dl->AddLine(ImVec2(a.x + rr * .9f, a.y + 1.5f), ImVec2(b.x - rr * .9f, a.y + 1.5f), lt ? WA(.9f) : WA(.36f), 1.3f);
+    } else {
+        dl->AddRectFilled(a, b, lt ? BA(.06f + .04f * hot) : WA(.070f + .050f * hot), rr);
+        dl->AddRectFilled(ImVec2(a.x + 1, a.y + 1), ImVec2(b.x - 1, a.y + h * .45f), lt ? WA(.20f) : WA(.030f), rr, ImDrawFlags_RoundCornersTop);
+        dl->AddRect(a, b, U32(Th().border), rr, 0, 1.f);
+    }
+    if (hot > 0.01f) dl->AddRect(a, b, AccA(.60f * hot), rr, 0, 1.5f * gS);
+}
+static ImVec4 PanelTint(float a) { ImVec4 c = Th().panel; c.w *= a * (GlassOn() ? .55f : 1.f); return c; }
+
+static void DrawLogo(ImDrawList* dl, ImVec2 c, float s) { // логотип: призрак на акцентной плитке
+    ImVec2 a(c.x - s / 2, c.y - s / 2), b(c.x + s / 2, c.y + s / 2); float rr = R(s * .3f), k = s * .5f; ImU32 w = WA(.96f);
+    dl->AddRectFilled(a, b, U32(gAccent), rr);
+    dl->AddRectFilled(ImVec2(a.x + 1, a.y + 1), ImVec2(b.x - 1, c.y), WA(.22f), rr, ImDrawFlags_RoundCornersTop);
+    dl->AddCircleFilled(ImVec2(c.x, c.y - k * .12f), k * .42f, w);
+    dl->AddRectFilled(ImVec2(c.x - k * .42f, c.y - k * .12f), ImVec2(c.x + k * .42f, c.y + k * .36f), w);
+    for (int i = 0; i < 3; i++) dl->AddCircleFilled(ImVec2(c.x + (i - 1) * k * .28f, c.y + k * .36f), k * .14f, w);
+    dl->AddCircleFilled(ImVec2(c.x - k * .16f, c.y - k * .1f), k * .07f, IM_COL32(60, 20, 40, 255));
+    dl->AddCircleFilled(ImVec2(c.x + k * .16f, c.y - k * .1f), k * .07f, IM_COL32(60, 20, 40, 255));
+}
+
 static bool FancyBtn(const char* label, ImVec2 sz, ImVec4 col, bool enabled = true) {
     ImGui::PushID(label);
     const char* hid = strstr(label, "##"); // видимая часть — до "##"
@@ -1504,14 +1548,19 @@ static bool FancyBtn(const char* label, ImVec2 sz, ImVec4 col, bool enabled = tr
     ImVec2 p = ImGui::GetCursorScreenPos();
     bool clk = ImGui::InvisibleButton("##b", sz);
     bool hov = ImGui::IsItemHovered() && enabled, act = ImGui::IsItemActive() && enabled;
-    float t = AnimK("h", hov ? 1.f : 0.f, 14.f), g = t * 2.5f - (act ? 2.5f : 0.f);
-    bool strong = col.w >= 0.85f; ImVec4 c = col;
-    if (strong) {
-        float k = enabled ? 1.f : .45f; c.x *= k; c.y *= k; c.z *= k;
-        c.x = std::min(1.f, c.x + .12f * t); c.y = std::min(1.f, c.y + .12f * t); c.z = std::min(1.f, c.z + .12f * t);
-    } else c.w = std::min(1.f, c.w * (enabled ? 1.f : .5f) + .08f * t);
+    float t = AnimK("h", hov ? 1.f : 0.f, 14.f);
+    bool strong = col.w >= 0.85f; float rr = R(sz.y * .38f);
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    dl->AddRectFilled(ImVec2(p.x - g, p.y - g), ImVec2(p.x + sz.x + g, p.y + sz.y + g), ImGui::GetColorU32(c), R(sz.y * 0.28f));
+    if (act) p.y += 1.f;
+    ImVec2 q(p.x + sz.x, p.y + sz.y);
+    if (strong) {
+        ImVec4 c = col; float k = enabled ? 1.f : .45f; c.x *= k; c.y *= k; c.z *= k;
+        c.x = std::min(1.f, c.x + .10f * t); c.y = std::min(1.f, c.y + .10f * t); c.z = std::min(1.f, c.z + .10f * t);
+        if (enabled) for (int i = 3; i >= 1; i--) dl->AddRectFilled(ImVec2(p.x - i * 2.5f, p.y - i * 1.2f + 3 * gS), ImVec2(q.x + i * 2.5f, q.y + i * 2.5f + 3 * gS), U32(ImVec4(c.x, c.y, c.z, (.055f + .05f * t))), rr + i * 2.5f);
+        dl->AddRectFilled(p, q, U32(c), rr);
+        dl->AddRectFilled(ImVec2(p.x + 1, p.y + 1), ImVec2(q.x - 1, p.y + sz.y * .5f), WA(GlassOn() ? .22f : .10f), rr, ImDrawFlags_RoundCornersTop);
+        dl->AddRect(p, q, WA(GlassOn() ? .30f : .14f), rr, 0, 1.f);
+    } else Surface(dl, p, q, rr, 0, enabled ? t : 0.f);
     ImVec2 ts = ImGui::CalcTextSize(label, hid);
     ImU32 tc = strong ? OnAccent(enabled ? 1.f : .55f) : TextCol(enabled ? 1.f : .5f);
     dl->AddText(ImVec2(p.x + (sz.x - ts.x) / 2, p.y + (sz.y - ts.y) / 2), tc, label, hid);
@@ -1562,21 +1611,27 @@ static bool TrashBtn(const char* id, float sz, bool enabled = true) { // ква�
 static void Open(const fs::path& p) { std::error_code ec; fs::create_directories(p, ec); ShellExecuteW(0, L"open", p.wstring().c_str(), 0, 0, SW_SHOWNORMAL); }
 static std::string AccLabel(const Account& a) { return std::string(a.type == 0 ? T("[офлайн] ", "[offline] ") : a.type == 1 ? "[Ely.by] " : "[Microsoft] ") + a.name; }
 
-static void TabBar(const char* const* labels, int n, int& cur, bool fade = true) {
-    float em = ImGui::GetFontSize(), h = em * 1.9f; ImVec2 s = ImGui::GetCursorScreenPos(); float x = s.x, tx = s.x, tw = 0;
+static void TabBar(const char* const* labels, int n, int& cur, bool fade = true) { // сегмент-переключатель: «таблетка» с плавающим акцентом
+    float em = ImGui::GetFontSize(), h = em * 2.2f; ImVec2 s = ImGui::GetCursorScreenPos(); float pad = em * .25f, x = s.x + pad, tx = x, tw = 0, total = pad * 2;
     ImDrawList* dl = ImGui::GetWindowDrawList();
+    std::vector<float> ws(n); for (int i = 0; i < n; i++) { ws[i] = ImGui::CalcTextSize(labels[i]).x + em * 1.6f; total += ws[i]; }
+    Surface(dl, s, ImVec2(s.x + total, s.y + h), R(h * .5f), 0);
+    float ih = h - pad * 2;
+    x = s.x + pad; for (int i = 0; i < n; i++) if (cur == i) { tx = x; tw = ws[i]; break; } else x += ws[i];
+    float ux = AnimK("ux", tx, 14.f, tx), uw = AnimK("uw", tw, 14.f, tw);
+    dl->AddRectFilled(ImVec2(ux, s.y + pad), ImVec2(ux + uw, s.y + pad + ih), AccA(.30f), R(ih * .5f));
+    dl->AddRect(ImVec2(ux, s.y + pad), ImVec2(ux + uw, s.y + pad + ih), AccA(.75f), R(ih * .5f), 0, 1.3f);
+    x = s.x + pad;
     for (int i = 0; i < n; i++) {
-        ImVec2 ts = ImGui::CalcTextSize(labels[i]); float w = ts.x + em * 1.2f;
-        ImGui::SetCursorScreenPos(ImVec2(x, s.y)); ImGui::PushID(i);
-        if (ImGui::InvisibleButton("##t", ImVec2(w, h)) && cur != i) { cur = i; if (fade) gScrFade = 0; }
+        ImVec2 ts = ImGui::CalcTextSize(labels[i]);
+        ImGui::SetCursorScreenPos(ImVec2(x, s.y + pad)); ImGui::PushID(i);
+        if (ImGui::InvisibleButton("##t", ImVec2(ws[i], ih)) && cur != i) { cur = i; if (fade) gScrFade = 0; }
         float t = AnimK("h", (ImGui::IsItemHovered() || cur == i) ? 1.f : 0.f, 12.f);
-        dl->AddText(ImVec2(x + em * .6f, s.y + (h - ts.y) / 2), TextCol(.5f + .5f * t), labels[i]);
-        if (cur == i) { tx = x; tw = w; }
-        x += w; ImGui::PopID();
+        dl->AddText(ImVec2(x + (ws[i] - ts.x) / 2, s.y + (h - ts.y) / 2), TextCol(.55f + .45f * t), labels[i]);
+        x += ws[i]; ImGui::PopID();
     }
-    float ux = AnimK("ux", tx, 12.f, tx), uw = AnimK("uw", tw, 12.f, tw);
-    dl->AddRectFilled(ImVec2(ux + em * .4f, s.y + h), ImVec2(ux + uw - em * .4f, s.y + h + 3), ImGui::GetColorU32(gAccent), 2.f);
     ImGui::SetCursorScreenPos(ImVec2(s.x, s.y + h + em * .8f));
+    ImGui::Dummy(ImVec2(1, 1));
 }
 // ---------- Версии под загрузчик и сборки ----------
 // Показываем ТОЛЬКО те версии, под которые выбранный загрузчик реально можно поставить. Пустой список (не загрузился) = версий нет, а не «все подряд».
@@ -1659,6 +1714,7 @@ static void MiniIcon(ImDrawList* dl, int id, ImVec2 c, float r, ImU32 col) {
                               ImVec2(c.x + ca * ro - px * wo, c.y + sa * ro - py * wo), ImVec2(c.x + ca * ri - px * wi, c.y + sa * ri - py * wi), col);
         }
         break; }
+    case 7: dl->AddTriangle(ImVec2(c.x - r * .85f, c.y - r * .05f), ImVec2(c.x, c.y - r * .8f), ImVec2(c.x + r * .85f, c.y - r * .05f), col, th); dl->AddRect(ImVec2(c.x - r * .6f, c.y - r * .05f), ImVec2(c.x + r * .6f, c.y + r * .75f), col, 0, 0, th); break; // главная
     default: { dl->PathArcTo(c, r * .6f, 0.5f, 5.4f); dl->PathStroke(col, 0, th); // обновить: дуга со стрелкой
                ImVec2 e(c.x + cosf(5.4f) * r * .6f, c.y + sinf(5.4f) * r * .6f); dl->AddTriangleFilled(ImVec2(e.x - r * .05f, e.y - r * .42f), ImVec2(e.x + r * .42f, e.y + r * .12f), ImVec2(e.x - r * .38f, e.y + r * .2f), col); break; }
     }
@@ -1706,21 +1762,45 @@ static bool SkinIsSlim(const SkinPx& s) { // у тонких (Alex) скинов
     if (s.w < 64 || s.h < 64) return false; int k = s.w / 64;
     const unsigned char* p = &s.px[((size_t)(20 * k) * s.w + 55 * k) * 4]; return p[3] == 0;
 }
-static SkinPx SkinDefault() { // запасной скин, если свой не выбран и скачать нечего
+static SkinPx SkinDefault() { // офлайн-скин по умолчанию: «призрак» в винной толстовке с капюшоном
     SkinPx s; s.w = s.h = 64; s.px.assign(64 * 64 * 4, 0);
-    const int SK[3] = {196, 142, 110}, HR[3] = {70, 44, 28}, SH[3] = {0, 150, 160}, PN[3] = {52, 56, 150}, FT[3] = {95, 95, 100};
-    auto F = [&](int x, int y, int w, int h, const int* c) { SkinFill(s, x, y, w, h, c[0], c[1], c[2]); };
-    F(8, 0, 8, 8, HR); F(16, 0, 8, 8, SK); F(0, 8, 8, 8, SK); F(8, 8, 8, 8, SK); F(16, 8, 8, 8, SK); F(24, 8, 8, 8, HR);
-    F(0, 8, 8, 3, HR); F(8, 8, 8, 2, HR); F(16, 8, 8, 3, HR);
-    SkinFill(s, 9, 12, 1, 1, 255, 255, 255); SkinFill(s, 14, 12, 1, 1, 255, 255, 255); SkinFill(s, 10, 12, 1, 1, 60, 70, 170); SkinFill(s, 13, 12, 1, 1, 60, 70, 170);
-    SkinFill(s, 11, 14, 2, 1, 130, 80, 70);
-    F(20, 16, 8, 4, SH); F(28, 16, 8, 4, SH); F(16, 20, 4, 12, SH); F(20, 20, 8, 12, SH); F(28, 20, 4, 12, SH); F(32, 20, 8, 12, SH);
-    for (int ax : {40, 32}) { int ay = ax == 40 ? 16 : 48; // правая / левая рука
-        F(ax + 4, ay, 8, 4, SK); F(ax, ay + 4, 16, 12, SK);
-        F(ax + 4, ay, 4, 4, SH); F(ax, ay + 4, 16, 4, SH); }
-    for (int lx : {0, 16}) { int ly = lx == 0 ? 16 : 48; // правая / левая нога
-        F(lx + 4, ly, 8, 4, PN); F(lx, ly + 4, 16, 12, PN);
-        F(lx + 4, ly, 4, 4, FT); F(lx + 8, ly, 4, 4, FT); SkinFill(s, lx, ly + 14, 16, 2, FT[0], FT[1], FT[2]); }
+    struct C { int r, g, b; };
+    const C SK{240, 200, 176}, SKD{214, 168, 146}, HR{44, 30, 58}, HRL{78, 54, 102}, HD{86, 30, 56}, HDL{122, 46, 78}, HDD{58, 18, 38}, PK{222, 106, 134}, WH{238, 238, 244},
+            PN{34, 36, 58}, PNL{50, 54, 84}, PND{24, 26, 44}, BL{236, 150, 160}, MO{170, 92, 104};
+    auto F = [&](int x, int y, int w, int h, const C& c) { SkinFill(s, x, y, w, h, c.r, c.g, c.b); };
+    auto Box = [&](int ox, int oy, int w, int h, int d, const C& c) { // все 6 граней параллелепипеда по раскладке скина
+        F(ox + d, oy, w, d, c); F(ox + d + w, oy, w, d, c); F(ox, oy + d, d, h, c); F(ox + d, oy + d, w, h, c); F(ox + d + w, oy + d, d, h, c); F(ox + 2 * d + w, oy + d, w, h, c);
+    };
+    // голова
+    Box(0, 0, 8, 8, 8, SK); F(16, 0, 8, 8, SKD); F(8, 0, 8, 8, HR); F(24, 8, 8, 8, HR);
+    F(10, 1, 3, 1, HRL); F(9, 3, 2, 1, HRL); F(25, 10, 3, 1, HRL); F(27, 13, 2, 1, HRL);
+    F(8, 8, 8, 2, HR); F(8, 10, 1, 2, HR); F(15, 10, 1, 2, HR); F(11, 10, 2, 1, HR); F(9, 9, 2, 1, HRL);
+    F(0, 8, 8, 2, HR); F(0, 10, 4, 6, HR); F(16, 8, 8, 2, HR); F(20, 10, 4, 6, HR);
+    F(9, 11, 2, 1, HR); F(13, 11, 2, 1, HR);                                   // брови
+    F(9, 12, 1, 1, WH); F(10, 12, 1, 1, PK); F(13, 12, 1, 1, PK); F(14, 12, 1, 1, WH); // глаза
+    F(9, 13, 1, 1, BL); F(14, 13, 1, 1, BL); F(11, 14, 2, 1, MO);                // румянец и улыбка
+    F(56, 11, 8, 5, HD); F(56, 11, 8, 1, HDL); F(32, 11, 3, 5, HD); F(53, 11, 3, 5, HD); // капюшон сзади (второй слой головы)
+    // тело
+    Box(16, 16, 8, 12, 4, HD); F(20, 20, 1, 12, HDD); F(27, 20, 1, 12, HDD);
+    F(22, 20, 4, 1, SK); F(23, 21, 2, 1, SK);                                    // вырез горловины
+    F(22, 22, 1, 3, WH); F(25, 22, 1, 3, WH); F(22, 25, 1, 1, PK); F(25, 25, 1, 1, PK); // шнурки
+    F(21, 27, 6, 3, HDD); F(21, 27, 6, 1, HDL);                                  // карман-кенгуру
+    F(20, 31, 8, 1, HDL); F(16, 31, 4, 1, HDL); F(28, 31, 4, 1, HDL); F(32, 31, 8, 1, HDL); // нижняя резинка
+    { const char* G[7] = {".XXXX.", "XXXXXX", "XOXXOX", "XXXXXX", "XXXXXX", "XXXXXX", "X.XX.X"}; // призрак на спине
+      for (int r = 0; r < 7; r++) for (int c = 0; c < 6; c++) { char ch = G[r][c]; if (ch == 'X') F(34 + c, 22 + r, 1, 1, WH); else if (ch == 'O') F(34 + c, 22 + r, 1, 1, PK); } }
+    // руки: рукав, манжета, кисть
+    for (int k = 0; k < 2; k++) {
+        int ox = k == 0 ? 40 : 32, oy = k == 0 ? 16 : 48, fy = oy + 4;
+        Box(ox, oy, 4, 12, 4, HD); F(ox + 8, oy, 4, 4, SK);
+        F(ox + 8, fy, 4, 9, HDD); F(ox, fy + 9, 16, 1, HDL); F(ox, fy + 10, 16, 2, SK);
+    }
+    // ноги: джинсы и кроссовки
+    for (int k = 0; k < 2; k++) {
+        int ox = k == 0 ? 0 : 16, oy = k == 0 ? 16 : 48, fy = oy + 4;
+        Box(ox, oy, 4, 12, 4, PN); F(ox + 8, oy, 4, 4, PK);
+        F(ox + 5, fy + 1, 1, 6, PNL); F(ox + 8, fy, 4, 9, PND);
+        F(ox, fy + 9, 16, 2, WH); F(ox, fy + 11, 16, 1, PK);
+    }
     return s;
 }
 
@@ -2109,7 +2189,7 @@ static void NewsCard(const char* head, const std::vector<std::string>& lines, bo
     float ind = bullets ? em * 1.1f : 0.f, tw = cw - em * 2 - ind, h = em * .8f + em * 1.5f;
     for (auto& l : lines) h += ImGui::CalcTextSize(l.c_str(), nullptr, false, tw).y + em * .4f;
     h += em * .4f;
-    dl->AddRectFilled(ImVec2(x0, p.y), ImVec2(x0 + cw, p.y + h), ImGui::GetColorU32(gSoft), R(em * .6f));
+    Surface(dl, ImVec2(x0, p.y), ImVec2(x0 + cw, p.y + h), R(em * .8f), 1);
     dl->AddText(ImVec2(x0 + em, p.y + em * .8f), ImGui::GetColorU32(gAccent), head);
     float y = p.y + em * .8f + em * 1.5f;
     for (auto& l : lines) {
@@ -2121,12 +2201,14 @@ static void NewsCard(const char* head, const std::vector<std::string>& lines, bo
     ImGui::Dummy(ImVec2(aw, h + em * .3f));
 }
 
-static bool Header(const char* title) { // заголовок экрана + стрелка «назад» справа; true = нажали «назад»
-    float em = ImGui::GetFontSize(); ImVec2 st = ImGui::GetCursorPos(); float w = ImGui::GetContentRegionAvail().x, bh = em * 2.2f, bw = em * 3.4f;
+static bool Header(const char* title) { // заголовок экрана (акцентная полоска) + стрелка «назад» справа; true = нажали «назад»
+    float em = ImGui::GetFontSize(); ImVec2 st = ImGui::GetCursorPos(); float w = ImGui::GetContentRegionAvail().x, bh = em * 2.3f, bw = em * 3.6f;
+    ImDrawList* dl = ImGui::GetWindowDrawList(); ImVec2 sp = ImGui::GetCursorScreenPos();
+    dl->AddRectFilled(ImVec2(sp.x, sp.y + bh * .12f), ImVec2(sp.x + 4.f * gS, sp.y + bh * .88f), U32(gAccent), 3.f);
     ImGui::PushFont(gFTitle); ImVec2 ts = ImGui::CalcTextSize(title);
-    ImGui::SetCursorPos(ImVec2(st.x, st.y + (bh - ts.y) / 2)); ImGui::TextColored(gAccent, "%s", title); ImGui::PopFont();
+    ImGui::SetCursorPos(ImVec2(st.x + em * .9f, st.y + (bh - ts.y) / 2)); ImGui::TextUnformatted(title); ImGui::PopFont();
     ImGui::SetCursorPos(ImVec2(st.x + w - bw, st.y)); bool back = BackBtn(ImVec2(bw, bh));
-    ImGui::SetCursorPos(ImVec2(st.x, st.y + bh + em * .6f));
+    ImGui::SetCursorPos(ImVec2(st.x, st.y + bh + em * .7f));
     return back;
 }
 static bool ComboI(const char* id, int& cur, const char* const* items, int n) {
@@ -2139,85 +2221,323 @@ static bool ComboI(const char* id, int& cur, const char* const* items, int n) {
 }
 static void OpenUrl(const std::string& u) { ShellExecuteW(0, L"open", W(u).c_str(), 0, 0, SW_SHOWNORMAL); }
 
-// ---------- Главный экран (по макету): сверху название и шестерёнка, по бокам кнопки, в центре скин, снизу «Создать сборку | ИГРАТЬ | аккаунт» ----------
-static void ScrMain() {
-    float em = ImGui::GetFontSize(); ImGuiStyle& sty = ImGui::GetStyle(); ImDrawList* dl = ImGui::GetWindowDrawList();
-    ImVec2 org = ImGui::GetCursorScreenPos(); float W = ImGui::GetContentRegionAvail().x, H = ImGui::GetContentRegionAvail().y, sp = sty.ItemSpacing.x;
-    ScanBuilds(false);
-    float bh = em * 2.4f;
-    { // шапка: PTLauncher + версия слева, шестерёнка (настройки) справа
-        ImGui::PushFont(gFTitle); ImVec2 ts = ImGui::CalcTextSize(kAppName);
-        ImGui::SetCursorPos(ImVec2(0, (bh - ts.y) / 2)); ImGui::TextColored(gAccent, "%s", kAppName); ImGui::PopFont();
-        std::string vs = std::string("v") + kVer; ImVec2 vz = ImGui::CalcTextSize(vs.c_str());
-        ImGui::SetCursorPos(ImVec2(ts.x + em * .8f, (bh - vz.y) / 2 + em * .2f)); ImGui::TextDisabled("%s", vs.c_str());
-        ImGui::SetCursorPos(ImVec2(W - bh, 0));
-        bool g = FancyBtn("##gear", ImVec2(bh, bh), gSoft);
-        ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax(); MiniIcon(dl, 5, ImVec2((a.x + b.x) / 2, (a.y + b.y) / 2), bh * .36f, TextCol());
-        if (g) Go(S_SET);
+// ============================ Новый интерфейс: навигация, сцена за персонажем, главный экран ============================
+static std::string AccTypeName(const Account& a) { return a.type == 0 ? T("Офлайн", "Offline") : a.type == 1 ? "Ely.by" : "Microsoft"; }
+static float Hash01(int n) { unsigned x = (unsigned)n * 2654435761u; x ^= x >> 15; x *= 2246822519u; x ^= x >> 13; return (x & 0xFFFFu) / 65535.f; }
+
+static void DrawFace(ImDrawList* dl, ImVec2 a, ImVec2 b, float rr) { // лицо игрока из текстуры скина (аватарка)
+    ID3D11ShaderResourceView* tv = gSkinTex.v ? gSkinTex.v : gDefTex.v;
+    if (!tv) { dl->AddRectFilled(a, b, U32(gAccent), rr); return; }
+    dl->AddImageRounded((ImTextureID)(intptr_t)tv, a, b, ImVec2(8 / 64.f, 8 / 64.f), ImVec2(16 / 64.f, 16 / 64.f), IM_COL32_WHITE, rr);
+    dl->AddImageRounded((ImTextureID)(intptr_t)tv, a, b, ImVec2(40 / 64.f, 8 / 64.f), ImVec2(48 / 64.f, 16 / 64.f), IM_COL32_WHITE, rr);
+}
+
+static void RoundedVGrad(ImDrawList* dl, ImVec2 a, ImVec2 b, float rr, ImVec4 top, ImVec4 bot) { // вертикальный градиент со скруглёнными углами
+    float h = b.y - a.y; rr = std::min(rr, h * .5f - 1.f); if (rr < 1.f) rr = 1.f;
+    auto C = [&](float y) { return U32(Mix(top, bot, std::clamp((y - a.y) / h, 0.f, 1.f))); };
+    dl->AddRectFilled(a, ImVec2(b.x, a.y + rr), C(a.y + rr * .5f), rr, ImDrawFlags_RoundCornersTop);
+    dl->AddRectFilled(ImVec2(a.x, b.y - rr), b, C(b.y - rr * .5f), rr, ImDrawFlags_RoundCornersBottom);
+    dl->AddRectFilledMultiColor(ImVec2(a.x, a.y + rr), ImVec2(b.x, b.y - rr), C(a.y + rr), C(a.y + rr), C(b.y - rr), C(b.y - rr));
+}
+
+// Ночная пиксельная сцена: звёзды, луна, горы и искры
+static void PixelScene(ImDrawList* dl, ImVec2 a, ImVec2 b, float rr) {
+    float em = ImGui::GetFontSize(), w = b.x - a.x, h = b.y - a.y, px = std::max(2.f, floorf(em * .28f));
+    ImVec4 top(.035f, .04f, .11f, 1.f), low = Mix(ImVec4(.10f, .05f, .17f, 1.f), ImVec4(gAccent.x * .55f, gAccent.y * .35f, gAccent.z * .45f, 1.f), .55f);
+    RoundedVGrad(dl, a, b, rr, top, low);
+    auto Sq = [&](float x, float y, float s, ImU32 c) { x = a.x + floorf((x - a.x) / px) * px; y = a.y + floorf((y - a.y) / px) * px; dl->AddRectFilled(ImVec2(x, y), ImVec2(x + s, y + s), c); };
+    for (int i = 0; i < 46; i++) {
+        float x = a.x + rr * .7f + Hash01(i * 7 + 1) * (w - rr * 1.4f), y = a.y + rr * .7f + Hash01(i * 7 + 2) * (h * .55f);
+        float tw = .35f + .65f * (.5f + .5f * sinf(gTime * (.6f + Hash01(i * 7 + 3) * 1.5f) + i));
+        Sq(x, y, px * (Hash01(i * 7 + 4) > .85f ? 1.5f : 1.f), WA(.8f * tw));
     }
-    float sw = std::min(em * 13.5f, W * 0.27f), sbh = em * 2.7f, gp = em * .9f, y0 = bh + em * 2.2f;
-    ImGui::SetCursorPos(ImVec2(0, y0)); if (SideBtn(T("Скины (BETA)", "Skins (BETA)"), 0, sw, sbh)) Go(S_SKINS);
-    ImGui::SetCursorPos(ImVec2(0, y0 + sbh + gp)); if (SideBtn(T("Статистика", "Statistics"), 1, sw, sbh)) Go(S_STATS);
-    ImGui::SetCursorPos(ImVec2(0, y0 + 2 * (sbh + gp))); if (SideBtn(T("Новости", "News"), 2, sw, sbh)) Go(S_NEWS);
-    ImGui::SetCursorPos(ImVec2(W - sw, y0)); if (SideBtn(T("Моды и сборки", "Mods & modpacks"), 3, sw, sbh)) Go(S_MODS);
-    ImGui::SetCursorPos(ImVec2(W - sw, y0 + sbh + gp));
-    if (SideBtn(T("Открыть папку...", "Open folder..."), 4, sw, sbh)) ImGui::OpenPopup("##folders");
-    {
-        ImVec2 fmin = ImGui::GetItemRectMin(), fmax = ImGui::GetItemRectMax();
-        ImGui::SetNextWindowPos(ImVec2(fmax.x, fmax.y + 4), 0, ImVec2(1, 0));
-        ImGui::SetNextWindowSize(ImVec2(em * 15, 0)); (void)fmin;
-        if (ImGui::BeginPopup("##folders")) {
-            fs::path gd = CurrentInstanceDir(); std::error_code ec;
-            if (ImGui::Selectable(T("Папка игры (сборки)", "Game (build) folder"))) Open(gd);
-            if (ImGui::Selectable(T("Папка mods", "Mods folder"))) Open(gd / "mods");
-            if (fs::exists(gd / "shaderpacks", ec) && ImGui::Selectable(T("Папка shaderpacks", "Shaderpacks folder"))) Open(gd / "shaderpacks");
-            if (fs::exists(gd / "screenshots", ec) && ImGui::Selectable(T("Скриншоты", "Screenshots"))) Open(gd / "screenshots");
-            if (ImGui::Selectable(T("Папка лаунчера", "Launcher folder"))) Open(gCfgDir);
-            ImGui::EndPopup();
+    { ImVec2 mc(a.x + w * .78f, a.y + h * .22f); float r = std::max(em * 1.4f, h * .085f);
+      for (int k = 4; k >= 1; k--) dl->AddCircleFilled(mc, r + k * r * .45f, AccA(.03f));
+      dl->AddCircleFilled(mc, r, IM_COL32(246, 236, 214, 255));
+      dl->AddCircleFilled(ImVec2(mc.x - r * .3f, mc.y - r * .2f), r * .22f, IM_COL32(226, 212, 186, 255));
+      dl->AddCircleFilled(ImVec2(mc.x + r * .25f, mc.y + r * .3f), r * .15f, IM_COL32(226, 212, 186, 255)); }
+    float ground = b.y - rr * 1.1f;
+    for (int layer = 0; layer < 2; layer++) {
+        ImU32 col = layer == 0 ? IM_COL32(34, 24, 66, 255) : IM_COL32(20, 14, 42, 255);
+        for (float x = a.x + rr; x < b.x - rr; x += px) {
+            float u = (x - a.x) / w, env = Smooth01(u / .10f) * Smooth01((1.f - u) / .10f);
+            float hh = layer == 0 ? h * (.30f + .14f * sinf(u * 7.f + 1.f) + .07f * sinf(u * 17.f + 2.f)) : h * (.17f + .09f * sinf(u * 5.f + 4.f) + .05f * sinf(u * 23.f));
+            hh = floorf(hh * env / px) * px; if (hh < 1.f) continue;
+            dl->AddRectFilled(ImVec2(x, ground - hh), ImVec2(x + px, ground + 1.f), col);
         }
     }
-    float rowH = em * 2.9f, statusH = em * 2.4f, capH = em * 1.8f;
-    float yRow = H - rowH, yStatus = yRow - statusH, yCap = yStatus - capH, top = bh + em * .4f, ah = std::max(em * 8.f, yCap - em * .2f - top);
-    { // игрок по центру: смотрит за курсором, по клику машет рукой
-        float sc = ah * 0.96f / 33.f; ImVec2 c(org.x + W / 2, org.y + top + ah / 2);
-        DrawSkinModel(dl, c, sc, true, 0.f);
-        ImGui::SetCursorScreenPos(ImVec2(c.x - 9 * sc, org.y + top)); if (ImGui::InvisibleButton("##skinhit", ImVec2(18 * sc, ah))) StartWave();
+    dl->AddRectFilled(ImVec2(a.x, ground), b, IM_COL32(10, 8, 22, 255), rr, ImDrawFlags_RoundCornersBottom);
+    for (int i = 0; i < 28; i++) {
+        float ph = fmodf(gTime * (.04f + .08f * Hash01(i * 11 + 1)) + Hash01(i * 11 + 2), 1.f);
+        float x = a.x + rr + Hash01(i * 11 + 3) * (w - 2 * rr) + sinf(gTime * .9f + i) * px * 2.f, y = ground - ph * (h - rr * 2.2f);
+        float al = sinf(ph * 3.14159f); ImU32 c = (i % 3) ? IM_COL32(255, 170, 90, (int)(220 * al)) : AccA(al);
+        Sq(x, y, px * (i % 4 == 0 ? 1.5f : 1.f), c);
     }
-    { // подпись: выбранная сборка (клик открывает список сборок)
-        const Build* cb = FindBuild(cfg.buildId); std::string cap = cb ? cb->name + "  ·  " + cb->loader + " " + cb->ver : std::string(T("Сборка не выбрана - нажми «Создать сборку»", "No build selected - press \"Create build\""));
-        ImVec2 cs = ImGui::CalcTextSize(cap.c_str()); ImVec2 cp(org.x + (W - cs.x) / 2, org.y + yCap + em * .3f);
-        dl->AddText(cp, TextCol(.8f), cap.c_str()); ImGui::SetCursorScreenPos(cp);
-        if (ImGui::InvisibleButton("##cap", ImVec2(std::max(1.f, cs.x), std::max(1.f, cs.y)))) Go(S_BUILDS);
+}
+
+static Tex gCharTex; static std::string gCharTexPath;
+static void LoadCharTex() { // картинка «за персонажем» (грузится один раз при смене файла)
+    if (gCharTexPath == cfg.charBg) return; gCharTexPath = cfg.charBg;
+    if (gCharTex.v) { gCharTex.v->Release(); gCharTex = Tex(); }
+    if (cfg.charBg.empty()) return;
+    std::string bytes = ReadAll(P(cfg.charBg)); if (bytes.empty() || bytes.size() > 20u * 1024 * 1024) return;
+    int w = 0, h = 0, ch = 0; unsigned char* d = stbi_load_from_memory((const unsigned char*)bytes.data(), (int)bytes.size(), &w, &h, &ch, 4); if (!d) return;
+    int f = std::max(1, std::max(w, h) / 1600), nw = w / f, nh = h / f; std::vector<unsigned char> out((size_t)nw * nh * 4);
+    for (int y = 0; y < nh; y++) for (int x = 0; x < nw; x++) for (int c = 0; c < 4; c++) {
+        int s = 0; for (int dy = 0; dy < f; dy++) for (int dx = 0; dx < f; dx++) s += d[(((size_t)y * f + dy) * w + (x * f + dx)) * 4 + c];
+        out[((size_t)y * nw + x) * 4 + c] = (unsigned char)(s / (f * f));
     }
-    { // строка статуса + прогресс
-        float w2 = std::min(W, em * 36.f); ImGui::SetCursorPos(ImVec2((W - w2) / 2, yStatus));
-        ImVec2 p = ImGui::GetCursorScreenPos(); float h = em * .3f, pr = AnimK("prog", gProg.load(), 6.f); bool busy = gBusy;
-        dl->AddRectFilled(ImVec2(p.x, p.y + 2), ImVec2(p.x + w2, p.y + 2 + h), ImGui::GetColorU32(ImVec4(gSoft.x, gSoft.y, gSoft.z, gSoft.w * .8f)), R(h / 2));
+    stbi_image_free(d); gCharTex.v = MakeTex(out.data(), nw, nh); gCharTex.w = nw; gCharTex.h = nh;
+}
+static void DrawStage(ImDrawList* dl, ImVec2 a, ImVec2 b, float rr) { // «сцена» за персонажем: своя картинка, пиксельная ночь или просто стекло
+    LoadCharTex();
+    if (gCharTex.v) {
+        float ar = (float)gCharTex.w / gCharTex.h, sr = (b.x - a.x) / (b.y - a.y); ImVec2 u0(0, 0), u1(1, 1);
+        if (ar > sr) { float k = sr / ar; u0.x = (1 - k) / 2; u1.x = 1 - u0.x; } else { float k = ar / sr; u0.y = (1 - k) / 2; u1.y = 1 - u0.y; }
+        dl->AddImageRounded((ImTextureID)(intptr_t)gCharTex.v, a, b, u0, u1, IM_COL32_WHITE, rr);
+        dl->AddRectFilled(a, b, BA(.18f), rr);
+    } else if (cfg.charScene) PixelScene(dl, a, b, rr);
+    else Surface(dl, a, b, rr, 1);
+    dl->AddRect(a, b, GlassOn() ? WA(.24f) : WA(.10f), rr, 0, 1.3f);
+}
+
+static void StageView(ImDrawList* dl, ImVec2 a, ImVec2 b) { // сцена с игроком по центру (смотрит за курсором, по клику машет)
+    float em = ImGui::GetFontSize(), rr = R(em * 1.1f);
+    DrawStage(dl, a, b, rr);
+    float sh = b.y - a.y, sc = std::min((sh - em * 4.6f) / 33.f, (b.x - a.x) / 24.f); if (sc < 1.f) sc = 1.f;
+    ImVec2 c((a.x + b.x) / 2, a.y + em * 1.2f + 16.5f * sc);
+    DrawSkinModel(dl, c, sc, true, 0.f);
+    ImGui::SetCursorScreenPos(ImVec2(c.x - 9 * sc, a.y)); if (ImGui::InvisibleButton("##skinhit", ImVec2(18 * sc, sh))) StartWave();
+    const Account* ac = (cfg.sel >= 0 && cfg.sel < (int)cfg.accs.size()) ? &cfg.accs[cfg.sel] : nullptr;
+    std::string nick = ac ? ac->name : std::string(T("Гость", "Guest"));
+    ImFont* f = FSub(); ImVec2 ns = ImGui::CalcTextSize(nick.c_str()); float tw = ns.x * (f->FontSize / ImGui::GetFontSize());
+    float pw = tw + em * 2.2f, ph = em * 1.9f, py = c.y + 16.2f * sc + em * .7f; ImVec2 p0(c.x - pw / 2, py);
+    dl->AddRectFilled(p0, ImVec2(p0.x + pw, p0.y + ph), BA(.38f), R(ph * .5f)); dl->AddRect(p0, ImVec2(p0.x + pw, p0.y + ph), WA(.18f), R(ph * .5f));
+    dl->AddText(f, f->FontSize, ImVec2(c.x - tw / 2, p0.y + (ph - f->FontSize) / 2), IM_COL32(255, 255, 255, 235), nick.c_str());
+}
+
+template <class F> static bool OptionCard(const char* id, float cw, float ph, bool sel, const char* title, const char* desc, F preview) { // карточка выбора с миниатюрой
+    float em = ImGui::GetFontSize(); ImDrawList* dl = ImGui::GetWindowDrawList(); ImGui::PushID(id);
+    float ch = ph + em * 3.4f; ImVec2 p = ImGui::GetCursorScreenPos();
+    bool clk = ImGui::InvisibleButton("##oc", ImVec2(cw, ch)); float t = AnimK("h", ImGui::IsItemHovered() ? 1.f : 0.f, 14.f);
+    Surface(dl, p, ImVec2(p.x + cw, p.y + ch), R(em * .9f), 1, sel ? 1.f : t * .5f);
+    preview(dl, ImVec2(p.x + em * .7f, p.y + em * .7f), ImVec2(p.x + cw - em * .7f, p.y + em * .7f + ph - em * .4f));
+    dl->AddText(ImVec2(p.x + em * .9f, p.y + ph + em * .55f), TextCol(), title);
+    dl->AddText(ImVec2(p.x + em * .9f, p.y + ph + em * 1.75f), TextCol(.55f), desc);
+    if (sel) { ImVec2 m(p.x + cw - em * 1.3f, p.y + em * 1.3f); dl->AddCircleFilled(m, em * .6f, U32(gAccent)); IconCheck(dl, m, em * .26f, OnAccent()); }
+    ImGui::PopID(); return clk;
+}
+static bool Toggle(const char* id, bool* v) { // переключатель-«таблетка»
+    float em = ImGui::GetFontSize(); ImVec2 sz(em * 2.8f, em * 1.5f), p = ImGui::GetCursorScreenPos(); ImDrawList* dl = ImGui::GetWindowDrawList();
+    bool clk = ImGui::InvisibleButton(id, sz); if (clk) *v = !*v;
+    float t = Anim(ImGui::GetItemID(), *v ? 1.f : 0.f, 14.f, *v ? 1.f : 0.f);
+    dl->AddRectFilled(p, ImVec2(p.x + sz.x, p.y + sz.y), WA(.16f), sz.y / 2); dl->AddRectFilled(p, ImVec2(p.x + sz.x, p.y + sz.y), AccA(.9f * t), sz.y / 2);
+    dl->AddCircleFilled(ImVec2(p.x + sz.y / 2 + t * (sz.x - sz.y), p.y + sz.y / 2), sz.y / 2 - 3.f * gS, IM_COL32(255, 255, 255, 245));
+    return clk;
+}
+
+// ---------- Левая навигация ----------
+static void DrawNav(float x, float y, float w, float h) {
+    float em = ImGui::GetFontSize(); ImDrawList* dl = ImGui::GetWindowDrawList(); bool compact = w < em * 6.f;
+    ImVec4 tint = PanelTint(1.f); Surface(dl, ImVec2(x, y), ImVec2(x + w, y + h), R(em * 1.1f), 2, 0.f, &tint);
+    struct It { int icon; const char *ru, *en; int scr; };
+    const It items[] = {{7, "Главная", "Home", S_MAIN}, {3, "Моды и сборки", "Mods & modpacks", S_MODS}, {0, "Скины", "Skins", S_SKINS}, {1, "Статистика", "Statistics", S_STATS}, {2, "Новости", "News", S_NEWS}, {4, "Папки", "Folders", -1}};
+    int cur = (gScr == S_BUILDS || gScr == S_CREATE) ? S_MAIN : gScr == S_LOG ? S_SET : gScr;
+    float pad = em * .7f, ih = em * 2.7f, gap = em * .3f, iw = w - pad * 2, yy = y + pad; ImVec2 folderPos(x + w, y);
+    auto Row = [&](int icon, const char* label, bool active, float ypos, ImVec2* rectMin) -> bool {
+        ImGui::SetCursorScreenPos(ImVec2(x + pad, ypos)); ImGui::PushID(label);
+        bool clk = ImGui::InvisibleButton("##n", ImVec2(iw, ih)); float t = AnimK("h", ImGui::IsItemHovered() ? 1.f : 0.f, 14.f);
+        ImVec2 a(x + pad, ypos), b(a.x + iw, a.y + ih); if (rectMin) *rectMin = ImVec2(b.x, a.y);
+        if (active) { dl->AddRectFilled(a, b, AccA(.22f), R(ih * .36f)); dl->AddRect(a, b, AccA(.55f), R(ih * .36f), 0, 1.2f); dl->AddRectFilled(ImVec2(a.x - pad * .55f, a.y + ih * .22f), ImVec2(a.x - pad * .55f + 3.f * gS, b.y - ih * .22f), U32(gAccent), 2.f); }
+        else if (t > .01f) dl->AddRectFilled(a, b, WA(.07f * t), R(ih * .36f));
+        ImVec2 c(compact ? (a.x + b.x) / 2 : a.x + ih * .55f, (a.y + b.y) / 2);
+        MiniIcon(dl, icon, c, ih * .25f, active ? U32(gAccent) : TextCol(.65f + .35f * t));
+        if (!compact) { ImVec2 ts = ImGui::CalcTextSize(label); dl->AddText(ImVec2(a.x + ih * 1.05f, c.y - ts.y / 2), TextCol(active ? 1.f : .7f + .3f * t), label); }
+        ImGui::PopID(); return clk;
+    };
+    for (auto& it : items) {
+        const char* lab = T(it.ru, it.en); ImVec2 rm;
+        if (Row(it.icon, lab, it.scr >= 0 && it.scr == cur, yy, &rm)) { if (it.scr >= 0) Go(it.scr); else ImGui::OpenPopup("##folders"); }
+        if (it.scr < 0) folderPos = rm;
+        yy += ih + gap;
+    }
+    { // внизу: аккаунт и настройки
+        float ay = y + h - pad - ih, accH = em * 3.3f, accY = ay - gap - accH;
+        if (Row(5, T("Настройки", "Settings"), cur == S_SET, ay, nullptr)) Go(S_SET);
+        ImGui::SetCursorScreenPos(ImVec2(x + pad, accY)); ImGui::PushID("accchip");
+        bool clk = ImGui::InvisibleButton("##ac", ImVec2(iw, accH)); float t = AnimK("h", ImGui::IsItemHovered() ? 1.f : 0.f, 14.f);
+        ImVec2 a(x + pad, accY), b(a.x + iw, a.y + accH); Surface(dl, a, b, R(accH * .3f), 0, (cur == S_ACC ? 1.f : t * .6f));
+        float fs = std::min(accH * .64f, iw - em * .6f); ImVec2 f0(compact ? (a.x + b.x) / 2 - fs / 2 : a.x + em * .6f, a.y + (accH - fs) / 2);
+        DrawFace(dl, f0, ImVec2(f0.x + fs, f0.y + fs), R(fs * .26f));
+        if (!compact) {
+            const Account* ac = (cfg.sel >= 0 && cfg.sel < (int)cfg.accs.size()) ? &cfg.accs[cfg.sel] : nullptr;
+            std::string nm = ac ? ac->name : std::string(T("Добавить аккаунт", "Add account")), sb = ac ? AccTypeName(*ac) : std::string(T("Войти", "Sign in"));
+            float tx = f0.x + fs + em * .7f; ImVec4 clip(tx, a.y, b.x - em * .3f, b.y);
+            dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(tx, a.y + accH * .5f - em * 1.05f), TextCol(), nm.c_str(), nullptr, 0.f, &clip);
+            dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(tx, a.y + accH * .5f + em * .05f), TextCol(.55f), sb.c_str(), nullptr, 0.f, &clip);
+        }
+        ImGui::PopID(); if (clk) Go(S_ACC);
+    }
+    ImGui::SetNextWindowPos(ImVec2(folderPos.x + 6, folderPos.y)); ImGui::SetNextWindowSize(ImVec2(em * 15, 0));
+    if (ImGui::BeginPopup("##folders")) {
+        fs::path gd = CurrentInstanceDir(); std::error_code ec;
+        if (ImGui::Selectable(T("Папка игры (сборки)", "Game (build) folder"))) Open(gd);
+        if (ImGui::Selectable(T("Папка mods", "Mods folder"))) Open(gd / "mods");
+        if (fs::exists(gd / "shaderpacks", ec) && ImGui::Selectable(T("Папка shaderpacks", "Shaderpacks folder"))) Open(gd / "shaderpacks");
+        if (fs::exists(gd / "screenshots", ec) && ImGui::Selectable(T("Скриншоты", "Screenshots"))) Open(gd / "screenshots");
+        if (ImGui::Selectable(T("Папка лаунчера", "Launcher folder"))) Open(gCfgDir);
+        ImGui::EndPopup();
+    }
+}
+
+// ---------- Нижняя панель: статус + «Создать сборку | ИГРАТЬ | аккаунт» ----------
+static void PlayBar(float W, float H, float rowH, float statusH) {
+    float em = ImGui::GetFontSize(), sp = ImGui::GetStyle().ItemSpacing.x; ImDrawList* dl = ImGui::GetWindowDrawList();
+    float yRow = H - rowH, yStatus = yRow - statusH;
+    { // статус и полоса прогресса
+        float w2 = std::min(W, em * 38.f); ImGui::SetCursorPos(ImVec2((W - w2) / 2, yStatus));
+        ImVec2 p = ImGui::GetCursorScreenPos(); float h = em * .36f, pr = AnimK("prog", gProg.load(), 6.f); bool busy = gBusy;
+        dl->AddRectFilled(ImVec2(p.x, p.y + 2), ImVec2(p.x + w2, p.y + 2 + h), WA(.10f), R(h / 2));
         if (pr > 0.005f) {
-            dl->AddRectFilled(ImVec2(p.x, p.y + 2), ImVec2(p.x + w2 * pr, p.y + 2 + h), ImGui::GetColorU32(gAccent), R(h / 2));
-            if (busy) { float sh = fmodf(gTime * 0.8f, 1.f); float sx = p.x + (w2 * pr) * sh; dl->AddRectFilled(ImVec2(sx, p.y + 2), ImVec2(std::min(sx + em * 2, p.x + w2 * pr), p.y + 2 + h), IM_COL32(255, 255, 255, 70), R(h / 2)); }
+            for (int k = 3; k >= 1; k--) dl->AddRectFilled(ImVec2(p.x, p.y + 2 - k), ImVec2(p.x + w2 * pr, p.y + 2 + h + k), AccA(.07f), R(h / 2 + k));
+            dl->AddRectFilled(ImVec2(p.x, p.y + 2), ImVec2(p.x + w2 * pr, p.y + 2 + h), U32(gAccent), R(h / 2));
+            if (busy) { float sh = fmodf(gTime * 0.8f, 1.f); float sx = p.x + (w2 * pr) * sh; dl->AddRectFilled(ImVec2(sx, p.y + 2), ImVec2(std::min(sx + em * 2, p.x + w2 * pr), p.y + 2 + h), IM_COL32(255, 255, 255, 80), R(h / 2)); }
         }
         std::string st; { std::lock_guard<std::mutex> l(gMu); st = gStatus; }
         ImVec2 tsz = ImGui::CalcTextSize(st.c_str()); ImVec4 clip(p.x, p.y, p.x + w2, p.y + statusH);
-        dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(p.x + std::max(0.f, (w2 - tsz.x) / 2), p.y + h + em * .35f), TextCol(.85f), st.c_str(), nullptr, w2, &clip);
+        dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(p.x + std::max(0.f, (w2 - tsz.x) / 2), p.y + h + em * .45f), TextCol(.8f), st.c_str(), nullptr, w2, &clip);
         ImGui::Dummy(ImVec2(w2, statusH));
     }
-    { // нижний ряд: Создать сборку | ИГРАТЬ | аккаунт
-        float total = std::min(W, em * 60.f), wl = (total - 2 * sp) * 0.28f, wc = total - 2 * sp - 2 * wl; bool busy = gBusy;
-        ImGui::SetCursorPos(ImVec2((W - total) / 2, yRow));
-        if (FancyBtn(T("Создать сборку", "Create build"), ImVec2(wl, rowH), gSoft)) Go(S_BUILDS); // список сборок + кнопка «Создать»
-        ImGui::SameLine();
-        if (busy) { // идёт загрузка/запуск: слева статус, справа «Остановить» (или «Закрыть», когда игра уже запущена)
-            bool run = gGameRunning, req = gCancel;
-            float sb = std::max(em * 7.f, wc * 0.40f), pw = wc - sb - sp;
-            FancyBtn(run ? T("Игра запущена", "Game running") : T("Работаю...", "Working..."), ImVec2(pw, rowH), gAccent, false);
-            ImGui::SameLine();
-            if (FancyBtn(req ? T("Останавливаю...", "Stopping...") : run ? T("Закрыть", "Close") : T("Остановить", "Stop"), ImVec2(sb, rowH), ImVec4(0.80f, 0.27f, 0.27f, 1.f), !req)) StopLaunch();
-        } else if (FancyBtn(T("ИГРАТЬ", "PLAY"), ImVec2(wc, rowH), gAccent, !gDelBusy)) { if (cfg.buildId.empty()) Go(S_CREATE); else StartLaunch(); }
-        ImGui::SameLine();
-        std::string al = (cfg.sel >= 0 && cfg.sel < (int)cfg.accs.size()) ? cfg.accs[cfg.sel].name : std::string(T("Добавить аккаунт", "Add account"));
-        if (FancyBtn(al.c_str(), ImVec2(wl, rowH), gSoft)) Go(S_ACC);
+    float total = std::min(W, em * 64.f), wl = (total - 2 * sp) * 0.27f, wc = total - 2 * sp - 2 * wl, x0 = (W - total) / 2; bool busy = gBusy;
+    ImGui::SetCursorPos(ImVec2(x0, yRow));
+    if (FancyBtn(T("Создать сборку", "Create build"), ImVec2(wl, rowH), gSoft)) Go(S_BUILDS);
+    ImGui::SetCursorPos(ImVec2(x0 + wl + sp, yRow));
+    if (busy) { // идёт загрузка/запуск: слева статус, справа «Остановить» (или «Закрыть», когда игра уже запущена)
+        bool run = gGameRunning, req = gCancel;
+        float sb = std::max(em * 7.f, wc * 0.40f), pw = wc - sb - sp;
+        FancyBtn(run ? T("Игра запущена", "Game running") : T("Работаю...", "Working..."), ImVec2(pw, rowH), gAccent, false);
+        ImGui::SetCursorPos(ImVec2(x0 + wl + sp + pw + sp, yRow));
+        if (FancyBtn(req ? T("Останавливаю...", "Stopping...") : run ? T("Закрыть", "Close") : T("Остановить", "Stop"), ImVec2(sb, rowH), ImVec4(0.80f, 0.27f, 0.27f, 1.f), !req)) StopLaunch();
+    } else {
+        const char* pl = T("ИГРАТЬ", "PLAY");
+        bool go = FancyBtn(pl, ImVec2(wc, rowH), gAccent, !gDelBusy);
+        { ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax(), m((a.x + b.x) / 2, (a.y + b.y) / 2); float tw = ImGui::CalcTextSize(pl).x, s = em * .62f, cx = m.x - tw / 2 - em * 1.2f;
+          dl->AddTriangleFilled(ImVec2(cx - s * .6f, m.y - s), ImVec2(cx - s * .6f, m.y + s), ImVec2(cx + s * .9f, m.y), OnAccent(gDelBusy ? .55f : 1.f)); }
+        if (go) { if (cfg.buildId.empty()) Go(S_CREATE); else StartLaunch(); }
     }
+    ImGui::SetCursorPos(ImVec2(x0 + wl + sp + wc + sp, yRow));
+    { // карточка аккаунта с аватаркой
+        ImVec2 p = ImGui::GetCursorScreenPos(); bool clk = ImGui::InvisibleButton("##accb", ImVec2(wl, rowH)); float t = AnimK("h", ImGui::IsItemHovered() ? 1.f : 0.f, 14.f);
+        Surface(dl, p, ImVec2(p.x + wl, p.y + rowH), R(rowH * .38f), 0, t);
+        const Account* ac = (cfg.sel >= 0 && cfg.sel < (int)cfg.accs.size()) ? &cfg.accs[cfg.sel] : nullptr;
+        float fs = rowH * .62f; ImVec2 f0(p.x + rowH * .19f, p.y + (rowH - fs) / 2); DrawFace(dl, f0, ImVec2(f0.x + fs, f0.y + fs), R(fs * .25f));
+        std::string nm = ac ? ac->name : std::string(T("Добавить аккаунт", "Add account")), sb = ac ? AccTypeName(*ac) : std::string(T("Нажми, чтобы войти", "Click to sign in"));
+        float tx = f0.x + fs + em * .7f; ImVec4 clip(tx, p.y, p.x + wl - em * .5f, p.y + rowH);
+        dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(tx, p.y + rowH * .5f - em * 1.05f), TextCol(), nm.c_str(), nullptr, 0.f, &clip);
+        dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(tx, p.y + rowH * .5f + em * .05f), TextCol(.55f), sb.c_str(), nullptr, 0.f, &clip);
+        if (clk) Go(S_ACC);
+    }
+}
+
+// ---------- Главный экран: «Игровой» (персонаж по центру) и «Библиотека» (сетка сборок + недавние миры) ----------
+struct RWorld { std::string name, date; long long t = 0; };
+static std::vector<RWorld> gRW; static float gRWT = 99.f; static std::string gRWBuild;
+static std::string FmtWDate(const fs::path& p) {
+    WIN32_FILE_ATTRIBUTE_DATA a{}; if (!GetFileAttributesExW(p.wstring().c_str(), GetFileExInfoStandard, &a)) return "?";
+    FILETIME lf; SYSTEMTIME st; if (!FileTimeToLocalFileTime(&a.ftLastWriteTime, &lf) || !FileTimeToSystemTime(&lf, &st)) return "?";
+    char t[48]; snprintf(t, sizeof(t), "%02d.%02d.%04d %02d:%02d", (int)st.wDay, (int)st.wMonth, (int)st.wYear, (int)st.wHour, (int)st.wMinute);
+    return t;
+}
+static void ScanRecentWorlds() {
+    gRWT += ImGui::GetIO().DeltaTime; if (gRWT < 3.f && gRWBuild == cfg.buildId) return; gRWT = 0; gRWBuild = cfg.buildId; gRW.clear();
+    if (cfg.buildId.empty()) return; std::error_code ec;
+    for (auto& e : fs::directory_iterator(CurrentInstanceDir() / "saves", ec)) {
+        if (!e.is_directory(ec)) continue; RWorld w; w.name = U8(e.path().filename().wstring()); w.date = FmtWDate(e.path());
+        auto ft = fs::last_write_time(e.path(), ec); w.t = (long long)ft.time_since_epoch().count(); gRW.push_back(w);
+    }
+    std::sort(gRW.begin(), gRW.end(), [](const RWorld& a, const RWorld& b) { return a.t > b.t; }); if (gRW.size() > 6) gRW.resize(6);
+}
+static ImVec4 LoaderColor(const std::string& l) {
+    if (l == "Fabric") return C8(214, 196, 150, 255); if (l == "Forge") return C8(110, 130, 190, 255); if (l == "NeoForge") return C8(232, 146, 70, 255);
+    if (l == "Quilt") return C8(160, 110, 210, 255); if (l == "OptiFine") return C8(210, 90, 90, 255); return C8(96, 176, 98, 255);
+}
+static void ScrMain() {
+    float em = ImGui::GetFontSize(); ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 org = ImGui::GetCursorScreenPos(); float W = ImGui::GetContentRegionAvail().x, H = ImGui::GetContentRegionAvail().y, sp = ImGui::GetStyle().ItemSpacing.x;
+    ScanBuilds(false);
+    float rowH = em * 3.1f, statusH = em * 2.3f, topH = em * 2.7f;
+    const Build* cb = FindBuild(cfg.buildId);
+    { // верхняя строка: выбранная сборка (клик - список сборок) и время в игре (клик - статистика)
+        float cwid = std::min(W * .58f, em * 28.f); ImGui::SetCursorPos(ImVec2(0, 0)); ImVec2 p = ImGui::GetCursorScreenPos();
+        bool clk = ImGui::InvisibleButton("##buildchip", ImVec2(cwid, topH)); float t = AnimK("h", ImGui::IsItemHovered() ? 1.f : 0.f, 14.f);
+        Surface(dl, p, ImVec2(p.x + cwid, p.y + topH), R(topH * .4f), 0, t);
+        float ts = topH * .66f; ImVec2 t0(p.x + topH * .17f, p.y + (topH - ts) / 2);
+        ImVec4 lc = cb ? LoaderColor(cb->loader) : gAccent; dl->AddRectFilled(t0, ImVec2(t0.x + ts, t0.y + ts), U32(lc), R(ts * .3f));
+        { std::string ch = cb ? cb->loader.substr(0, 1) : std::string("+"); ImVec2 cs = ImGui::CalcTextSize(ch.c_str()); dl->AddText(ImVec2(t0.x + (ts - cs.x) / 2, t0.y + (ts - cs.y) / 2), IM_COL32(20, 20, 28, 235), ch.c_str()); }
+        std::string nm = cb ? cb->name : std::string(T("Сборка не выбрана", "No build selected")), sb = cb ? cb->loader + "  " + cb->ver : std::string(T("Нажми, чтобы выбрать или создать", "Click to choose or create"));
+        float tx = t0.x + ts + em * .8f; ImVec4 clip(tx, p.y, p.x + cwid - em * 2.2f, p.y + topH);
+        dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(tx, p.y + topH * .5f - em * 1.1f), TextCol(), nm.c_str(), nullptr, 0.f, &clip);
+        dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(tx, p.y + topH * .5f + em * .05f), TextCol(.55f), sb.c_str(), nullptr, 0.f, &clip);
+        { ImVec2 m(p.x + cwid - em * 1.2f, p.y + topH / 2); float s = em * .3f; ImU32 c = TextCol(.5f + .5f * t); dl->AddLine(ImVec2(m.x - s * .5f, m.y - s), ImVec2(m.x + s * .5f, m.y), c, 2.f); dl->AddLine(ImVec2(m.x + s * .5f, m.y), ImVec2(m.x - s * .5f, m.y + s), c, 2.f); }
+        if (clk) Go(S_BUILDS);
+        std::string pt = std::string(T("В игре: ", "Played: ")) + FmtDur(cfg.playSec); float pw = ImGui::CalcTextSize(pt.c_str()).x + em * 2.4f;
+        if (W > cwid + pw + em * 2) {
+            ImGui::SetCursorPos(ImVec2(W - pw, 0)); ImVec2 q = ImGui::GetCursorScreenPos(); bool c2 = ImGui::InvisibleButton("##playtime", ImVec2(pw, topH)); float t2 = AnimK("h", ImGui::IsItemHovered() ? 1.f : 0.f, 14.f);
+            Surface(dl, q, ImVec2(q.x + pw, q.y + topH), R(topH * .4f), 0, t2);
+            ImVec2 s2 = ImGui::CalcTextSize(pt.c_str()); dl->AddText(ImVec2(q.x + (pw - s2.x) / 2, q.y + (topH - s2.y) / 2), TextCol(.8f), pt.c_str());
+            if (c2) Go(S_STATS);
+        }
+    }
+    float sy = topH + em * .7f, sh = std::max(em * 9.f, H - rowH - statusH - em * .5f - sy);
+    if (cfg.home == 1) { // ---- Игровой ----
+        StageView(dl, ImVec2(org.x, org.y + sy), ImVec2(org.x + W, org.y + sy + sh));
+    } else { // ---- Библиотека ----
+        float gap = em * .9f, lw = std::min(std::max(em * 22.f, W * .60f), W - em * 16.f), gridH = sh * .62f;
+        ImGui::SetCursorPos(ImVec2(0, sy));
+        ImGui::BeginChild("libgrid", ImVec2(lw, gridH), 0, ImGuiWindowFlags_NoBackground);
+        {
+            ImDrawList* cdl = ImGui::GetWindowDrawList(); float aw = ImGui::GetContentRegionAvail().x - em * .8f; int cols = aw > em * 34.f ? 3 : 2; float cw = (aw - sp * (cols - 1)) / cols, ch = em * 5.2f;
+            int n = (int)gBuilds.size() + 1;
+            for (int i = 0; i < n; i++) {
+                if (i % cols) ImGui::SameLine(0, sp);
+                ImGui::PushID(i); ImVec2 p = ImGui::GetCursorScreenPos(); bool clk = ImGui::InvisibleButton("##c", ImVec2(cw, ch)); float t = AnimK("h", ImGui::IsItemHovered() ? 1.f : 0.f, 14.f);
+                if (i == (int)gBuilds.size()) { // карточка «создать»
+                    Surface(cdl, p, ImVec2(p.x + cw, p.y + ch), R(em * .9f), 0, t); ImVec2 m(p.x + cw / 2, p.y + ch / 2 - em * .45f); float s = em * .6f; ImU32 c = TextCol(.6f + .4f * t);
+                    cdl->AddLine(ImVec2(m.x - s, m.y), ImVec2(m.x + s, m.y), c, 2.f * gS); cdl->AddLine(ImVec2(m.x, m.y - s), ImVec2(m.x, m.y + s), c, 2.f * gS);
+                    const char* l = T("Создать сборку", "Create build"); ImVec2 ls = ImGui::CalcTextSize(l); cdl->AddText(ImVec2(p.x + (cw - ls.x) / 2, m.y + s + em * .5f), c, l);
+                    if (clk) Go(S_CREATE);
+                } else {
+                    const Build& b = gBuilds[i]; bool sel = b.id == cfg.buildId;
+                    Surface(cdl, p, ImVec2(p.x + cw, p.y + ch), R(em * .9f), 1, sel ? 1.f : t * .5f);
+                    float ts = ch * .46f; ImVec2 t0(p.x + em * .9f, p.y + em * .9f); cdl->AddRectFilled(t0, ImVec2(t0.x + ts, t0.y + ts), U32(LoaderColor(b.loader)), R(ts * .3f));
+                    { std::string c1 = b.loader.substr(0, 1); ImVec2 cs = ImGui::CalcTextSize(c1.c_str()); cdl->AddText(ImVec2(t0.x + (ts - cs.x) / 2, t0.y + (ts - cs.y) / 2), IM_COL32(20, 20, 28, 235), c1.c_str()); }
+                    float tx = t0.x + ts + em * .7f; ImVec4 clip(tx, p.y, p.x + cw - em * 2.2f, p.y + ch);
+                    cdl->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(tx, t0.y), TextCol(), b.name.c_str(), nullptr, 0.f, &clip);
+                    std::string sb = b.loader + " " + b.ver; cdl->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(tx, t0.y + em * 1.25f), TextCol(.55f), sb.c_str(), nullptr, 0.f, &clip);
+                    std::string pt = FmtDur(b.playSec); cdl->AddText(ImVec2(p.x + em * .9f, p.y + ch - em * 1.7f), TextCol(.45f), pt.c_str());
+                    if (sel) { ImVec2 m(p.x + cw - em * 1.2f, p.y + em * 1.2f); cdl->AddCircleFilled(m, em * .55f, U32(gAccent)); IconCheck(cdl, m, em * .24f, OnAccent()); }
+                    if (clk) SelectBuild(b.id);
+                }
+                ImGui::PopID();
+            }
+        }
+        ImGui::EndChild();
+        { // недавние миры выбранной сборки
+            ScanRecentWorlds(); float wy = sy + gridH + gap * .5f; ImVec2 hp(org.x, org.y + wy);
+            dl->AddText(hp, TextCol(.55f), T("НЕДАВНИЕ МИРЫ", "RECENT WORLDS"));
+            float chipH = em * 3.2f, cy = org.y + wy + em * 1.6f, chipW = (lw - 2 * sp) / 3.f;
+            if (gRW.empty()) dl->AddText(ImVec2(org.x, cy + em * .4f), TextCol(.45f), T("Миров пока нет: они появятся после первой игры.", "No worlds yet: they will appear after the first game."));
+            for (int i = 0; i < (int)gRW.size() && i < 3; i++) {
+                ImVec2 p(org.x + i * (chipW + sp), cy); Surface(dl, p, ImVec2(p.x + chipW, p.y + chipH), R(em * .8f), 0);
+                ImVec2 m(p.x + chipH * .5f, p.y + chipH / 2); float s = em * .5f; dl->AddRect(ImVec2(m.x - s, m.y - s), ImVec2(m.x + s, m.y + s), AccA(.9f), R(2.f), 0, 1.6f * gS); dl->AddLine(ImVec2(m.x - s, m.y - s * .2f), ImVec2(m.x + s, m.y - s * .2f), AccA(.9f), 1.4f * gS);
+                float tx = p.x + chipH; ImVec4 clip(tx, p.y, p.x + chipW - em * .5f, p.y + chipH);
+                dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(tx, p.y + chipH * .5f - em * 1.05f), TextCol(), gRW[i].name.c_str(), nullptr, 0.f, &clip);
+                dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(tx, p.y + chipH * .5f + em * .05f), TextCol(.5f), gRW[i].date.c_str(), nullptr, 0.f, &clip);
+            }
+        }
+        StageView(dl, ImVec2(org.x + lw + gap, org.y + sy), ImVec2(org.x + W, org.y + sy + sh));
+    }
+    PlayBar(W, H, rowH, statusH);
 }
 
 // ---------- Скины ----------
@@ -2226,7 +2546,7 @@ static void ScrSkins() {
     float em = ImGui::GetFontSize(); ImDrawList* dl = ImGui::GetWindowDrawList();
     if (Header(T("Скины (BETA)", "Skins (BETA)"))) { Go(S_MAIN); return; }
     ImVec2 org = ImGui::GetCursorScreenPos(); float aw = ImGui::GetContentRegionAvail().x, ah = ImGui::GetContentRegionAvail().y, lw = std::max(em * 16.f, aw * 0.42f);
-    dl->AddRectFilled(org, ImVec2(org.x + lw, org.y + ah), ImGui::GetColorU32(gSoft), R(em * .8f));
+    DrawStage(dl, org, ImVec2(org.x + lw, org.y + ah), R(em * 1.0f));
     DrawSkinModel(dl, ImVec2(org.x + lw / 2, org.y + ah / 2), (ah - em * 2) * .95f / 33.f, false, gSkinUserYaw);
     ImGui::SetCursorScreenPos(org); ImGui::InvisibleButton("##skinprev", ImVec2(lw, ah));
     if (ImGui::IsItemActive()) gSkinUserYaw += ImGui::GetIO().MouseDelta.x * 0.012f;
@@ -2274,7 +2594,7 @@ static void ScrStats() {
     std::string vals[3] = {FmtDur(cfg.playSec), std::to_string(cfg.launches), std::to_string(gBuilds.size())};
     const char* labs[3] = {T("Время в игре", "Time played"), T("Запусков игры", "Game launches"), T("Сборок", "Builds")};
     for (int i = 0; i < 3; i++) {
-        ImVec2 p(p0.x + i * (cw + sp), p0.y); dl->AddRectFilled(p, ImVec2(p.x + cw, p.y + ch), ImGui::GetColorU32(gSoft), R(em * .7f));
+        ImVec2 p(p0.x + i * (cw + sp), p0.y); Surface(dl, p, ImVec2(p.x + cw, p.y + ch), R(em * .9f), 1);
         dl->AddText(ImVec2(p.x + em, p.y + em * .8f), TextCol(.6f), labs[i]);
         dl->AddText(gFSub, gFSub->FontSize, ImVec2(p.x + em, p.y + em * 2.1f), ImGui::GetColorU32(gAccent), vals[i].c_str());
     }
@@ -2285,7 +2605,7 @@ static void ScrStats() {
     if (bs.empty()) TD(T("Пока нет ни одной сборки.", "No builds yet."));
     for (int i = 0; i < (int)bs.size(); i++) {
         float w = ImGui::GetContentRegionAvail().x, rh = em * 2.8f; ImVec2 p = ImGui::GetCursorScreenPos();
-        cdl->AddRectFilled(p, ImVec2(p.x + w, p.y + rh), ImGui::GetColorU32(gSoft), R(em * .6f));
+        Surface(cdl, p, ImVec2(p.x + w, p.y + rh), R(em * .8f), 1);
         std::string left = bs[i].name + "   " + bs[i].loader + " " + bs[i].ver;
         std::string right = FmtDur(bs[i].playSec) + "   |   " + std::to_string(bs[i].launches) + T(" запусков", " launches");
         ImVec2 rs = ImGui::CalcTextSize(right.c_str()); ImVec4 clip(p.x, p.y, p.x + w - rs.x - em * 2, p.y + rh);
@@ -2887,7 +3207,7 @@ static void ScrBuilds() {
         ImGui::PushID(i); ImVec2 p = ImGui::GetCursorScreenPos();
         bool clk = ImGui::InvisibleButton("##b", ImVec2(cw, rh)), hov = ImGui::IsItemHovered(), sel = b.id == cfg.buildId;
         float t = AnimK("h", hov ? 1.f : 0.f, 14.f);
-        cdl->AddRectFilled(p, ImVec2(p.x + cw, p.y + rh), ImGui::GetColorU32(ImVec4(gSoft.x, gSoft.y, gSoft.z, std::min(1.f, gSoft.w + .10f * t))), R(em * .7f));
+        Surface(cdl, p, ImVec2(p.x + cw, p.y + rh), R(em * .9f), 1, t * .5f);
         if (sel) cdl->AddRect(p, ImVec2(p.x + cw, p.y + rh), ImGui::GetColorU32(gAccent), R(em * .7f), 0, 2.f * gS);
         ImVec4 clip(p.x, p.y, p.x + cw - em * 6.5f, p.y + rh);
         cdl->AddText(gFSub, gFSub->FontSize, ImVec2(p.x + em, p.y + em * .65f), TextCol(), b.name.c_str(), nullptr, 0.f, &clip);
@@ -2990,14 +3310,55 @@ static void ScrSettings() {
         ImGui::Checkbox(T("Бета-версии (old_beta)", "Beta versions (old_beta)"), &cfg.showBeta);
         ImGui::Checkbox(T("Альфа-версии (old_alpha)", "Alpha versions (old_alpha)"), &cfg.showAlpha);
 
-    } else if (gSetTab == 1) { // ---- Кастомизация ----
+    } else if (gSetTab == 1) { // ---- Кастомизация: стиль, главный экран, фон за персонажем, тема, фон ----
+        float aw = ImGui::GetContentRegionAvail().x, sp = ImGui::GetStyle().ItemSpacing.x, cw2 = (aw - sp) / 2, pvh = em * 4.6f;
+        TD(T("СТИЛЬ ОФОРМЛЕНИЯ", "INTERFACE STYLE"));
+        for (int i = 0; i < 2; i++) {
+            if (i) ImGui::SameLine(0, sp);
+            auto pv = [&](ImDrawList* d, ImVec2 a, ImVec2 b) {
+                float rr = R(em * .7f), w = b.x - a.x, h = b.y - a.y;
+                if (i == 0) { RoundedVGrad(d, a, b, rr, ImVec4(.17f, .04f, .08f, 1.f), ImVec4(.05f, .01f, .03f, 1.f));
+                    d->AddRectFilled(ImVec2(a.x + w * .08f, a.y + h * .18f), ImVec2(b.x - w * .08f, a.y + h * .38f), WA(.07f), R(em * .4f));
+                    d->AddRectFilled(ImVec2(a.x + w * .08f, b.y - h * .42f), ImVec2(a.x + w * .38f, b.y - h * .16f), U32(Mix(gAccent, ImVec4(0, 0, 0, 1), .35f)), R(em * .45f));
+                } else { RoundedVGrad(d, a, b, rr, ImVec4(.42f, .14f, .30f, 1.f), ImVec4(.20f, .06f, .15f, 1.f));
+                    d->AddRectFilled(ImVec2(a.x + w * .08f, a.y + h * .18f), ImVec2(b.x - w * .08f, a.y + h * .38f), WA(.22f), R(em * .45f)); d->AddRect(ImVec2(a.x + w * .08f, a.y + h * .18f), ImVec2(b.x - w * .08f, a.y + h * .38f), WA(.45f), R(em * .45f));
+                    d->AddRectFilled(ImVec2(a.x + w * .08f, b.y - h * .42f), ImVec2(a.x + w * .38f, b.y - h * .16f), WA(.22f), R(em * .45f)); d->AddRect(ImVec2(a.x + w * .08f, b.y - h * .42f), ImVec2(a.x + w * .38f, b.y - h * .16f), WA(.45f), R(em * .45f)); }
+            };
+            if (OptionCard(i == 0 ? "st0" : "st1", cw2, pvh, cfg.style == i, i == 0 ? T("Классический", "Classic") : T("Жидкое стекло", "Liquid glass"),
+                           i == 0 ? T("Тёмный винный стиль, как раньше.", "Dark wine style, as before.") : T("Прозрачное стекло с бликами, как в iOS.", "Translucent glass with highlights, like iOS."), pv)) { cfg.style = i; SaveConfig(); }
+        }
+        ImGui::Dummy(ImVec2(0, em * .2f));
+        TD(T("ГЛАВНЫЙ ЭКРАН", "HOME SCREEN"));
+        for (int i = 0; i < 2; i++) {
+            if (i) ImGui::SameLine(0, sp);
+            auto pv = [&](ImDrawList* d, ImVec2 a, ImVec2 b) {
+                float rr = R(em * .7f), w = b.x - a.x, h = b.y - a.y; RoundedVGrad(d, a, b, rr, ImVec4(.13f, .12f, .15f, 1.f), ImVec4(.07f, .07f, .09f, 1.f));
+                if (i == 0) { for (int r = 0; r < 2; r++) for (int c = 0; c < 4; c++) { float x = a.x + w * .06f + c * w * .225f, y = a.y + h * .30f + r * h * .33f; d->AddRectFilled(ImVec2(x, y), ImVec2(x + w * .195f, y + h * .27f), WA(.14f), R(em * .25f)); }
+                    d->AddRectFilled(ImVec2(a.x + w * .06f, a.y + h * .10f), ImVec2(a.x + w * .40f, a.y + h * .20f), WA(.12f), R(em * .25f)); }
+                else { d->AddRectFilled(ImVec2(a.x + w * .46f, a.y + h * .12f), ImVec2(a.x + w * .54f, a.y + h * .62f), WA(.30f), R(em * .3f));
+                    d->AddRectFilled(ImVec2(a.x + w * .06f, a.y + h * .72f), ImVec2(a.x + w * .72f, a.y + h * .90f), WA(.14f), R(em * .3f)); d->AddRectFilled(ImVec2(a.x + w * .76f, a.y + h * .72f), ImVec2(b.x - w * .06f, a.y + h * .90f), U32(Mix(gAccent, ImVec4(0, 0, 0, 1), .3f)), R(em * .3f));
+                    d->AddRectFilled(ImVec2(a.x + w * .06f, a.y + h * .12f), ImVec2(a.x + w * .22f, a.y + h * .22f), WA(.14f), R(em * .25f)); }
+            };
+            if (OptionCard(i == 0 ? "hm0" : "hm1", cw2, pvh, cfg.home == i, i == 0 ? T("Библиотека", "Library") : T("Игровой", "Game"),
+                           i == 0 ? T("Сетка сборок и недавние миры", "Build grid and recent worlds") : T("Персонаж и большая кнопка «Играть»", "Character and a big \"Play\" button"), pv)) { cfg.home = i; SaveConfig(); }
+        }
+        ImGui::Dummy(ImVec2(0, em * .3f));
+        TD(T("ФОН ЗА ПЕРСОНАЖЕМ", "BACKGROUND BEHIND THE CHARACTER"));
+        if (Toggle("##scene", &cfg.charScene)) SaveConfig();
+        ImGui::SameLine(0, em * .8f); ImGui::BeginGroup(); ImGui::TextUnformatted(T("Ночная пиксельная сцена", "Night pixel scene"));
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + std::max(em * 10.f, aw - em * 5.f)); TD(T("Горы, луна и искры. Выключите, если нужен простой фон.", "Mountains, moon and sparks. Turn it off for a plain background.")); ImGui::PopTextWrapPos(); ImGui::EndGroup();
+        ImGui::Dummy(ImVec2(0, em * .1f));
+        if (FancyBtn(T("Своя картинка...", "Own picture..."), ImVec2(em * 12.f, em * 2.f), gSoft)) { std::string f = PickImage(gHwnd); if (!f.empty()) { cfg.charBg = f; SaveConfig(); } }
+        ImGui::SameLine(); if (FancyBtn(T("Сбросить", "Reset"), ImVec2(em * 8.f, em * 2.f), gSoft, !cfg.charBg.empty())) { cfg.charBg.clear(); SaveConfig(); }
+        if (!cfg.charBg.empty()) { ImGui::SameLine(); ImGui::TextDisabled("%s", PS(P(cfg.charBg).filename()).c_str()); }
+        TD(T("PNG, JPG, BMP или TGA (до 20 МБ). Встанет за персонажем на весь блок.", "PNG, JPG, BMP or TGA (up to 20 MB). It goes behind the character, filling the block."));
+        ImGui::Dummy(ImVec2(0, em * .3f));
         TD(T("ТЕМА", "THEME"));
-        { float aw = ImGui::GetContentRegionAvail().x, sp = ImGui::GetStyle().ItemSpacing.x; int cols = aw > em * 54 ? 3 : 2; float cw = (aw - sp * (cols - 1)) / cols;
+        { int cols = aw > em * 54 ? 3 : 2; float cw = (aw - sp * (cols - 1)) / cols;
           for (int i = 0; i < 5; i++) { if (i % cols) ImGui::SameLine(0, sp); ThemeCard(i, cw, em * 5.2f); } }
         ImGui::Dummy(ImVec2(0, em * .3f));
-        ImGui::Checkbox(T("Закругление углов", "Rounded corners"), &cfg.rounded);
         if (Th().glass) {
-            TD(T("Фон", "Background"));
+            TD(T("ФОН", "BACKGROUND"));
             if (FancyBtn(T("Загрузить", "Upload"), ImVec2(em * 11, em * 1.9f), gSoft)) { std::string f = PickImage(gHwnd); if (!f.empty()) { cfg.bg = f; cfg.slideshow = false; LoadBgAsync(f); } }
             ImGui::SameLine(); if (FancyBtn(T("Скрины из майна", "Minecraft screenshots"), ImVec2(em * 14, em * 1.9f), gSoft)) { ScanShots(); cfg.slideshow = true; NextShot(); }
             ImGui::Checkbox(T("Слайд-шоу (каждые ~18 сек)", "Slideshow (every ~18 s)"), &cfg.slideshow);
@@ -3091,9 +3452,7 @@ static void DrawToast(float W) { // плашка-приветствие свер
     for (int k = 4; k >= 1; k--) dl->AddRectFilled(ImVec2(x - k * 3.f, y - k * 2.f + 4), ImVec2(x + w + k * 3.f, y + h + k * 3.f + 4), IM_COL32(0, 0, 0, 14), rr + k * 3.f);
     ImVec4 bgc = th.light ? ImVec4(1.f, 1.f, 1.f, .97f) : ImVec4(th.pvBg.x + .03f, th.pvBg.y + .03f, th.pvBg.z + .035f, .97f);
     dl->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + h), U(bgc), rr); dl->AddRect(ImVec2(x, y), ImVec2(x + w, y + h), U(th.light ? ImVec4(0, 0, 0, .12f) : ImVec4(1, 1, 1, .16f)), rr);
-    ImVec2 i0(x + pad, y + (h - icon) / 2); dl->AddRectFilled(i0, ImVec2(i0.x + icon, i0.y + icon), U(th.accent), R(icon * .28f));
-    { ImVec2 ts = ImGui::CalcTextSize("PT"); float l = .299f * th.accent.x + .587f * th.accent.y + .114f * th.accent.z;
-      dl->AddText(ImVec2(i0.x + (icon - ts.x) / 2, i0.y + (icon - ts.y) / 2), l > .64f ? IM_COL32(20, 22, 30, 255) : IM_COL32(255, 255, 255, 255), "PT"); }
+    ImVec2 i0(x + pad, y + (h - icon) / 2); DrawLogo(dl, ImVec2(i0.x + icon / 2, i0.y + icon / 2), icon);
     float tx = i0.x + icon + em * .8f; ImU32 tc = th.light ? IM_COL32(25, 26, 34, 255) : IM_COL32(245, 245, 248, 255);
     dl->AddText(ImVec2(tx, y + pad * .55f), th.light ? IM_COL32(90, 90, 100, 255) : IM_COL32(170, 170, 180, 255), kAppName);
     dl->AddText(gFSub, gFSub->FontSize, ImVec2(tx, y + pad * .55f + em * 1.15f), tc, line.c_str());
@@ -3134,7 +3493,14 @@ static void DrawUI(float W, float H) {
     ImGui::PopStyleVar(2);
     float em = ImGui::GetFontSize(), intro = AnimK("intro", 1.f, 2.5f);
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    float tbH = em * 2.3f; gCapH = tbH; // верхняя полоса: за неё окно можно таскать
+    float tbH = em * 2.8f; gCapH = tbH; // верхняя полоса: за неё окно можно таскать
+    { // логотип, название и версия
+        float ls = em * 1.75f; DrawLogo(dl, ImVec2(em * 1.0f + ls / 2, tbH / 2 + em * .1f), ls);
+        ImFont* f = FSub(); float tx = em * 1.0f + ls + em * .7f; dl->AddText(f, f->FontSize, ImVec2(tx, tbH / 2 + em * .1f - f->FontSize / 2), TextCol(), kAppName);
+        std::string vs = std::string("v") + kVer; ImVec2 vz = ImGui::CalcTextSize(vs.c_str()), nz = ImGui::CalcTextSize(kAppName); float vx = tx + nz.x * (f->FontSize / ImGui::GetFontSize()) + em * .8f;
+        Surface(dl, ImVec2(vx, tbH / 2 + em * .1f - em * .75f), ImVec2(vx + vz.x + em * 1.2f, tbH / 2 + em * .1f + em * .75f), R(em * .75f), 0);
+        dl->AddText(ImVec2(vx + em * .6f, tbH / 2 + em * .1f - vz.y / 2), TextCol(.65f), vs.c_str());
+    }
     { // кнопки окна: свернуть / развернуть (или в окно) / закрыть
         bool maxed = IsZoomed(gHwnd) != 0;
         float bw = em * 2.6f, bh = em * 1.7f, gp = em * .3f, total = bw * 3 + gp * 2, x0 = W - em * 1.2f - total, y0 = (tbH - bh) / 2 + em * .2f;
@@ -3167,9 +3533,10 @@ static void DrawUI(float W, float H) {
         }
     }
 
-    float pw = W - em * 2.4f, px = em * 1.2f - (1 - intro) * em * 3, py = tbH, ph = H - tbH - em * 1.2f;
-    { ImVec4 pc = th.panel; pc.w *= intro; ImVec4 bc = th.border; bc.w *= intro;
-      dl->AddRectFilled(ImVec2(px, py), ImVec2(px + pw, py + ph), U(pc), R(em * .9f)); dl->AddRect(ImVec2(px, py), ImVec2(px + pw, py + ph), U(bc), R(em * .9f)); }
+    bool compact = W < em * 58.f; float navW = compact ? em * 4.4f : em * 11.8f, nx = em * 1.0f, nh = H - tbH - em * 1.0f, slide = (1 - intro) * em * 3;
+    DrawNav(nx - slide, tbH, navW, nh);
+    float px = nx + navW + em * .9f - slide, pw = W - (nx + navW + em * .9f) - em * 1.0f, py = tbH, ph = nh;
+    { ImVec4 pc = PanelTint(intro); Surface(dl, ImVec2(px, py), ImVec2(px + pw, py + ph), R(em * 1.1f), 2, 0.f, &pc); }
     ImGui::SetCursorPos(ImVec2(px + em, py + em));
     ImGui::PushStyleVar(ImGuiStyleVar_Alpha, intro);
     ImGui::BeginChild("panel", ImVec2(pw - em * 2, ph - em * 2), false, ImGuiWindowFlags_NoBackground);
@@ -3364,7 +3731,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int) {
         SkinTick();
         UpdateBackground(dt);
 
-        { int sg = std::clamp(cfg.theme, 0, 4) | (cfg.rounded ? 16 : 0); if (sg != gThemeSig) { gThemeSig = sg; ApplyTheme(); } }
+        { int sg = std::clamp(cfg.theme, 0, 4) | 16 | (cfg.style << 5); if (sg != gThemeSig) { gThemeSig = sg; ApplyTheme(); } }
         ImGui_ImplDX11_NewFrame(); ImGui_ImplWin32_NewFrame(); ImGui::NewFrame();
         RECT rc; GetClientRect(gHwnd, &rc);
         DrawUI((float)(rc.right - rc.left), (float)(rc.bottom - rc.top));
